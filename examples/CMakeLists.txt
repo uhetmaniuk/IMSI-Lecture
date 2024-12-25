@@ -1,0 +1,13 @@
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
+INCLUDE_DIRECTORIES("{$Kokkos_INCLUDE_DIR}")
+
+ADD_EXECUTABLE(
+  Laplace1D.exe
+  Laplace1D.cpp
+)
+target_link_libraries(Laplace1D.exe
+  PUBLIC
+  tacho
+)
+
