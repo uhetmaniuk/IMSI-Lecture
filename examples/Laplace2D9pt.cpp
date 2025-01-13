@@ -9,16 +9,80 @@
 using accelerator_type = typename Tacho::UseThisDevice<Kokkos::DefaultExecutionSpace>::type;
 using host_execution_type = typename Tacho::UseThisDevice<Kokkos::DefaultHostExecutionSpace>::type;
 
-using real = double;
+using real = float;
 
 int main(int argc, char *argv[]) {
 
     Kokkos::initialize(argc, argv);
     {
-        int n = 64;
-        int nnz = 3 * n - 2;
-        auto const h = real(1) / real(n);
+        int nx = 32;
+        const int ny = nx;
+        auto const h = real(1) / real(nx + 1);
 
+        /*
+        std::vector<int> mesh, perm;
+        std::vector<int> rowind, colptr;
+        std::vector<Scalar> nzvals;
+
+        nnodes = nx * ny;
+
+        mesh.resize(nnodes);
+        for (i = 0; i < nnodes; i++) {
+            mesh[i] = i;
+        }
+
+        colptr.resize(nnodes + 1, 0);
+        rowind.reserve(9 * nnodes);
+        nzvals.reserve(9 * nnodes);
+
+        colptr[0] = 0;
+        node = 0;
+
+        for (j = 0; j < ny; j++) {
+            for (i = 0; i < nx; i++) {
+
+                if (j > 0) {
+                    if (i > 0) {
+                        rowind.push_back(mesh(i - 1, j - 1));
+                        nzvals.push_back(Scalar(-0.25) / (h * h));
+                    }
+                    rowind.push_back(mesh(i, j - 1));
+                    nzvals.push_back(Scalar(-0.5) / (h * h));
+                    if (i + 1 < nx) {
+                        rowind.push_back(mesh(i + 1, j - 1));
+                        nzvals.push_back(Scalar(-0.25) / (h * h));
+                    }
+                }
+
+                if (i > 0) {
+                    rowind.push_back(mesh(i - 1, j));
+                    nzvals.push_back(Scalar(-0.5) / (h * h));
+                }
+                rowind.push_back(mesh(i, j));
+                nzvals.push_back(Scalar(3.0) / (h * h));
+                if (i + 1 < nx) {
+                    rowind.push_back(mesh(i + 1, j));
+                    nzvals.push_back(Scalar(-0.5) / (h * h));
+                }
+
+                if (j + 1 < ny) {
+                    if (i > 0) {
+                        rowind.push_back(mesh(i - 1, j + 1));
+                        nzvals.push_back(Scalar(-0.25) / (h * h));
+                    }
+                    rowind.push_back(mesh(i, j + 1));
+                    nzvals.push_back(Scalar(-0.5) / (h * h));
+                    if (i + 1 < nx) {
+                        rowind.push_back(mesh(i + 1, j + 1));
+                        nzvals.push_back(Scalar(-0.25) / (h * h));
+                    }
+                }
+
+                colptr[node + 1] = int(rowind.size());
+                node++;
+            }
+        }
+*/
         Kokkos::View<real *> values("values", nnz);
         Kokkos::View<size_t *> rowPtr("row pointer", n + 1);
         Kokkos::View<int *> colIdx("column indices", nnz);

@@ -118,9 +118,6 @@ ENDFOREACH()
 
 #-----------------------------------------------------------------------------
 #
-message(STATUS " include ${CMAKE_CURRENT_BINARY_DIR}")
-message(STATUS " include ${CMAKE_CURRENT_SOURCE_DIR}")
-message(STATUS " include ${CMAKE_CURRENT_SOURCE_DIR}/impl")
 target_include_directories(tacho
                PUBLIC
                ${CMAKE_CURRENT_BINARY_DIR}

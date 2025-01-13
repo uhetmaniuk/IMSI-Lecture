@@ -43,8 +43,20 @@ IF (LAPACK_FOUND)
    SET (EXTRALIB ${EXTRALIB} ${LAPACK_LIBRARIES})
 ENDIF (LAPACK_FOUND)
 
-find_package(Kokkos REQUIRED)
-
-add_subdirectory(tacho)
+add_subdirectory(TPL)
+add_subdirectory(src)
 add_subdirectory(examples)
 
+###################
+
+add_executable(main.exe  main.cpp)
+
+target_include_directories(main.exe
+        PUBLIC
+        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+)
+
+target_link_libraries(main.exe
+        PUBLIC
+        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+)

@@ -416,6 +416,8 @@ inline double computeRelativeResidual(const CrsMatrixBase<ValueType, DeviceType>
   return sqrt(diff / norm);
 }
 
+/// \brief Compute the product A * x and store it in b
+/// \note The computation is made on the host and generates a mirror of A, x, and b.
 template <typename ValueType, typename DeviceType>
 inline void computeSpMV(const CrsMatrixBase<ValueType, DeviceType> &A,
                         const Kokkos::View<ValueType **, Kokkos::LayoutLeft, DeviceType> &x,
