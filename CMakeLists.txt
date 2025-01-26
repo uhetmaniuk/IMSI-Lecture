@@ -53,7 +53,7 @@ add_executable(main.exe  main.cpp)
 
 target_include_directories(main.exe
         PUBLIC
-        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos Eigen
+        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
 )
 
 target_link_libraries(main.exe
