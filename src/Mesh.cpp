@@ -4,6 +4,24 @@
 
 namespace IMSI {
 
+    Mesh::Mesh(
+            int dim,
+            std::vector< std::array<double, 3> > const& vertex,
+            std::vector<ElementType>&& cList,
+            std::vector< std::vector<int> >&& cToN,
+            std::vector<int>&& nodeBdry
+    ) : sdim(dim), vertex_x(vertex.size()), vertex_y(vertex.size()), vertex_z(vertex.size()),
+        cellType(std::move(cList)), cellToNode(std::move(cToN)),
+        boundaryNode(std::move(nodeBdry)) {
+        size_t count = 0;
+        for (auto const& coord : vertex) {
+            vertex_x[count] = coord[0];
+            vertex_y[count] = coord[1];
+            vertex_z[count] = coord[2];
+            count += 1;
+        }
+    }
+
     std::ostream &operator<<
             (
                     std::ostream &os, const IMSI::Mesh &ref
@@ -11,42 +29,24 @@ namespace IMSI {
 
         os << "//\n// NODES\n//\n";
 
-        for (int iN = 0; iN < ref.vertexList.size(); ++iN) {
+        for (int iN = 0; iN < ref.vertex_x.size(); ++iN) {
             os.precision(8);
             os.setf(std::ios::scientific, std::ios::floatfield);
-            auto const &coord = ref.vertexList[iN];
-            for (int jD = 0; jD < 3; ++jD)
-                os << coord[jD] << " ";
+            os << ref.vertex_x[iN] << " " << ref.vertex_y[iN] << " " << ref.vertex_z[iN];
             os << std::endl;
         } // for (int iN = 0; iN < ref.d_numVertices; ++iN)
 
         os << "//\n// MESH CONNECTIVITY\n//\n";
 
-        for (int iE = 0; iE < ref.cellToNode.size(); ++iE) {
-            auto const &vertexList = ref.cellToNode[iE];
-            for (int jN = 0; jN < vertexList.size(); ++jN)
-                os << vertexList[jN] << " ";
+        for (const auto & vertexList : ref.cellToNode) {
+            for (int jN : vertexList) {
+                os << jN << " ";
+            }
             os << std::endl;
-        } // for (int iE = 0; iE < ref.d_numCells; ++iE)
+        }
 
         return os;
 
     }
 
 }
-
-
-/*
-
-//
-// Questions:
-// * Do we need a global side list?
-// * How to manage the orientation of sides?????
-// * Do we need to store sideList in each element?
-// * How to create the map sideToCell?
-// * How to identify edges in 3D?
-// * Do we need to store elemToElem?
-//
-
-*/
-

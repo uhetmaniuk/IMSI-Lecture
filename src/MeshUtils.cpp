@@ -2,12 +2,8 @@
 
 #include <iostream>
 
-#include <Kokkos_Core.hpp>
-#include <KokkosKernels_config.h>
-#include <KokkosKernels_Handle.hpp>
-#include <Kokkos_StaticCrsGraph.hpp>
-#include <KokkosSparse_spgemm.hpp>
-#include <KokkosSparse_Utils.hpp>
+#include "FunctionExamples.h"
+#include "ScaledLaplacian.h"
 
 namespace IMSI {
 
@@ -19,7 +15,7 @@ namespace IMSI {
         int const nX = params.numElePerDir[0];
         int const nY = (dim < 2) ? 0 : params.numElePerDir[1];
         int const nZ = (dim < 3) ? 0 : params.numElePerDir[2];
-        int const numCells = nX * nY * nZ;
+        int const numCells = (dim == 1) ? nX : ((dim == 2) ? nX * nY: nX * nY * nZ);
         auto const Lx = params.upperCorner[0] - params.lowerCorner[0];
         auto const Ly = (dim < 2) ? 0 : params.upperCorner[1] - params.lowerCorner[1];
         auto const Lz = (dim < 3) ? 0 : params.upperCorner[2] - params.lowerCorner[2];
@@ -158,8 +154,7 @@ namespace IMSI {
             }
         }
 
-        std::vector<ElementType> cType;
-        cType.resize(numCells, params.cellType);
+        std::vector<ElementType> cType(numCells, params.cellType);
 
         // Define global points
         std::vector<std::array<double, 3> > vList;
@@ -183,7 +178,7 @@ namespace IMSI {
                         for (int iX = 0; iX <= twoNX; ++iX) {
                             if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY) || (iZ == 0) ||
                                 (iZ == twoNZ)) {
-                                boundaryNode.push_back(vList.size());
+                                boundaryNode.push_back(int(vList.size()));
                             }
                             coord[0] = 0.5 * iX * hX;
                             coord[1] = 0.5 * iY * hY;
@@ -218,8 +213,7 @@ namespace IMSI {
                 break;
             }
         }
-
-        return Mesh{std::move(vList), std::move(cType), std::move(cList), std::move(boundaryNode)};
+        return Mesh{dim, vList, std::move(cType), std::move(cList), std::move(boundaryNode)};
     }
 
     Mesh GenerateMesh(DomainParams const &params, std::vector<double> corners) {
@@ -240,124 +234,6 @@ namespace IMSI {
             case DomainType::Brick: {
                 return GenerateUniformTensor<3>(params);
             }
-        }
-
-    }
-
-    template<typename Device, typename Idx = int>
-    Kokkos::StaticCrsGraph<Idx, Device>
-    CombineGraphs(const Kokkos::StaticCrsGraph<Idx, Device> &aTob, const Kokkos::StaticCrsGraph<Idx, Device> &bToc) {
-        //
-        typedef Kokkos::StaticCrsGraph<Idx, Device> OutputGraph;
-        using row_map_type = typename OutputGraph::row_map_type::non_const_type;
-        using entries_type = typename OutputGraph::entries_type::non_const_type;
-        //
-        //row_map_type row_mapC(Kokkos::view_alloc(Kokkos::WithoutInitializing, "non_const_lnow_row"), aTob.numRows() + 1);
-        //--- row_mapC is initialized to 0 by default
-        row_map_type row_mapC("RowMapC", aTob.numRows() + 1);
-        Kokkos::parallel_for(aTob.numRows(), KOKKOS_LAMBDA(const int i) {
-            row_mapC(i + 1) += 1;
-            for (size_t j = aTob.row_map[i]; j < aTob.row_map[i + 1]; ++j) {
-                auto const bIdx = aTob.entries[j];
-                row_mapC(i + 1) += bToc.row_map[bIdx + 1] - bToc.row_map[bIdx] - 1;
-            }
-        });
-        // create_mirror_view will only create a new view if the original one is not in HostSpace.
-        auto h_row = Kokkos::create_mirror_view(row_mapC);
-        h_row(0) = 0;
-        for (int i = 0; i < aTob.numRows(); ++i) {
-            h_row(i + 1) += h_row(i);
-        }
-        Kokkos::deep_copy(row_mapC, h_row);
-        //
-        row_map_type tmp_row("TmpRow", aTob.numRows() + 1);
-        entries_type tmp_entries("TmpEntries", h_row(aTob.numRows()));
-        //
-        Kokkos::parallel_for(aTob.numRows(), KOKKOS_LAMBDA(const int ia) {
-            for (size_t j = aTob.row_map[ia]; j < aTob.row_map[ia + 1]; ++j) {
-                auto const bIdx = aTob.entries[j];
-                for (size_t k = bToc.row_map[bIdx]; k < bToc.row_map[bIdx + 1]; ++k) {
-                    auto cIdx = bToc.entries[k];
-                    bool isStored = false;
-                    for (size_t l = 0; l < tmp_row(ia + 1); ++l) {
-                        if (tmp_entries(row_mapC(ia) + l) == cIdx) {
-                            isStored = true;
-                            break;
-                        }
-                    }
-                    if (!isStored) {
-                        tmp_entries(row_mapC(ia) + tmp_row(ia + 1)) = cIdx;
-                        tmp_row(ia + 1) += 1;
-                    }
-                }
-            }
-        });
-        //
-        h_row = Kokkos::create_mirror_view(tmp_row);
-        h_row(0) = 0;
-        for (int i = 0; i < aTob.numRows(); ++i) {
-            h_row(i + 1) += h_row(i);
-        }
-        Kokkos::deep_copy(tmp_row, h_row);
-        //--- Compress the temporary entries array into `entriesC`
-        entries_type entriesC("Entries", h_row(aTob.numRows()));
-        Kokkos::parallel_for(aTob.numRows(), KOKKOS_LAMBDA(const int ia) {
-            auto const len = tmp_row(ia + 1) - tmp_row(ia);
-            for (size_t j = 0; j < len; ++j) {
-                entriesC(tmp_row(ia) + j) = tmp_entries(row_mapC(ia) + j);
-            }
-        });
-        for (size_t ia = 0; ia < aTob.numRows(); ++ia) {
-            Kokkos::sort(entriesC, h_row(ia), h_row(ia + 1));
-        }
-        Kokkos::deep_copy(row_mapC, tmp_row);
-        //
-        return {entriesC, row_mapC};
-    }
-
-    void GetMatrixSparsity(const Mesh &grid) {
-        typedef Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::DefaultHostExecutionSpace::memory_space> device_type;
-        typedef Kokkos::StaticCrsGraph<int, device_type> StaticCrsGraphType;
-
-        // Get the element-to-node in Kokkos format
-        auto e2n = Kokkos::create_staticcrsgraph<StaticCrsGraphType>("CellToNode", grid.CellToNode());
-
-        // Make the node-to-element connectivity in Kokkos format
-        Kokkos::View<size_t *, Kokkos::DefaultHostExecutionSpace> rowPtr("TransposeGraphRow",
-                                                                         grid.NumberVertices() + 1);
-        Kokkos::View<int *, Kokkos::DefaultHostExecutionSpace> entries("TransposeGraphEntries",
-                                                                       e2n.row_map[e2n.numRows()]);
-        KokkosSparse::Impl::transpose_graph<StaticCrsGraphType::row_map_type,
-                StaticCrsGraphType::entries_type,
-                StaticCrsGraphType::row_map_type::non_const_type,
-                StaticCrsGraphType::entries_type,
-                StaticCrsGraphType::row_map_type::non_const_type, Kokkos::DefaultHostExecutionSpace>(grid.NumberCells(),
-                                                                                                     grid.NumberVertices(),
-                                                                                                     e2n.row_map,
-                                                                                                     e2n.entries,
-                                                                                                     rowPtr,
-                                                                                                     entries);
-
-        StaticCrsGraphType n2e(entries, rowPtr);
-
-        // Make the node-to-node connectivity
-        auto n2n = CombineGraphs<device_type, int>(n2e, e2n);
-        for (int ii = 0; ii < n2n.numRows(); ++ii) {
-            std::cout << ii << " = ";
-            for (int j = n2n.row_map[ii]; j < n2n.row_map[ii + 1]; ++j) {
-                std::cout << n2n.entries[j] << " ";
-            }
-            std::cout << "\n";
-        }
-
-        // Make the cell-to-cell connectivity
-        auto e2e = CombineGraphs<device_type, int>(e2n, n2e);
-        for (int ii = 0; ii < e2e.numRows(); ++ii) {
-            std::cout << ii << " # ";
-            for (int j = e2e.row_map[ii]; j < e2e.row_map[ii + 1]; ++j) {
-                std::cout << e2e.entries[j] << " ";
-            }
-            std::cout << "\n";
         }
 
     }

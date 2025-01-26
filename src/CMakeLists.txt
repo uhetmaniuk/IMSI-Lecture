@@ -2,11 +2,23 @@ add_library(imsi_lib)
 target_sources(imsi_lib
         PUBLIC
         Element.h
+        fe1DQ1.h
+        fe1DQ2.h
+        fe2DQ1.h
+        fe2DQ2.h
+        fe3DQ1.h
+        fe3DQ2.h
+        FunctionExamples.h
         Mesh.h
         MeshUtils.h
+        QuadratureRule.h
+        MathUtils.h
+        Utils.h
         PRIVATE
         Mesh.cpp
         MeshUtils.cpp
+        QuadratureRule.cpp
+        Utils.cpp
 )
 
 target_include_directories(imsi_lib
