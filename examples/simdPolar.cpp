@@ -15,19 +15,22 @@ int main(int argc, char **argv) {
     const int dim = 2;
     const int rep = 5000;
     double sum = 0.;
+    using real = float;
 
     Kokkos::initialize(argc, argv);
     {
-        using simd_type = Kokkos::Experimental::native_simd<double>;
-        std::cout << "double Kokkos " << Kokkos::Experimental::native_simd<double>::size() << "\n";
-        std::cout << " float Kokkos " << Kokkos::Experimental::native_simd<float>::size() << "\n";
-        std::cout << " int32 Kokkos " << Kokkos::Experimental::native_simd<int32_t>::size() << "\n";
-        std::cout << " int64 Kokkos " << Kokkos::Experimental::native_simd<int64_t>::size() << "\n";
-        //
-        using real = double;
+        using simd_type = Kokkos::Experimental::native_simd<real>;
+        std::cout << "double Kokkos " << Kokkos::Experimental::native_simd<double>::size() << " Vc " << Vc::double_v::size() << "\n";
+        std::cout << " float Kokkos " << Kokkos::Experimental::native_simd<float>::size() << " Vc " << Vc::float_v::size()<< "\n";
+        std::cout << " int32 Kokkos " << Kokkos::Experimental::native_simd<int32_t>::size() << " Vc " << Vc::int32_v::size()<< "\n";
+        std::cout << " int64 Kokkos " << Kokkos::Experimental::native_simd<int64_t>::size() << " Vc " << Vc::int64_v::size()<< "\n";
 
-        for (int pk = 2048; pk < 5000; pk *= 2) {
-            for (int p = pk - 4; p <= pk + 4; p += 1) {
+        std::cout << "\n";
+        std::cout << " p   |   for Loop   for Comp.        Vc          Kokkos";
+        std::cout << "\n";
+
+        for (int pk = 4096; pk < 10000; pk *= 2) {
+            for (int p = pk - 2; p <= pk + 2; p += 1) {
                 Kokkos::Random_XorShift64_Pool<> random_pool(/*seed=*/12345);
                 auto generator = random_pool.get_state();
 
@@ -57,6 +60,9 @@ int main(int argc, char **argv) {
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
+                //
+                // LLVM vectorization https://llvm.org/docs/Vectorizers.html
+                //
                 sum = 0.0;
                 r.assign(p, 0.0);
                 std::chrono::duration<double> dt88(0);

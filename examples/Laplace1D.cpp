@@ -19,9 +19,9 @@ int main(int argc, char *argv[]) {
         int nnz = 3 * n - 2;
         auto const h = real(1) / real(n);
 
-        Kokkos::View<real *> values("values", nnz);
-        Kokkos::View<size_t *> rowPtr("row pointer", n + 1);
-        Kokkos::View<int *> colIdx("column indices", nnz);
+        Kokkos::View<real *, Kokkos::DefaultHostExecutionSpace> values("values", nnz);
+        Kokkos::View<size_t *, Kokkos::DefaultHostExecutionSpace> rowPtr("row pointer", n + 1);
+        Kokkos::View<int *, Kokkos::DefaultHostExecutionSpace> colIdx("column indices", nnz);
 
         rowPtr(0) = 0;
         rowPtr(1) = 2;
@@ -86,7 +86,7 @@ int main(int argc, char *argv[]) {
             timer.reset();
             solver.solve(x, b, wt);
             solve_time += timer.seconds();
-            const double res = solver.computeRelativeResidual(A.Values(), x, b);
+            auto const res = solver.computeRelativeResidual(A.Values(), x, b);
             std::cout << "TachoSolver: residual = " << res << "\n";
         }
         std::cout << std::endl;
