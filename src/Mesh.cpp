@@ -1,5 +1,6 @@
 #include "Mesh.h"
 
+#include <algorithm>
 #include <ostream>
 
 namespace IMSI {

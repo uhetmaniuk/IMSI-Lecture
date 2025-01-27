@@ -1,3 +1,5 @@
+#include <cassert>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -34,7 +36,7 @@ namespace IMSI {
                     break;
                 }
                 case 2: {
-                    xi[0] = -1.0 / sqrt(3.0);
+                    xi[0] = -1.0 / std::sqrt(3.0);
                     xi[1] = -xi[0];
                     //----
                     weights[0] = 1.0;
@@ -42,7 +44,7 @@ namespace IMSI {
                     break;
                 }
                 case 3: {
-                    xi[0] = -sqrt(0.6);
+                    xi[0] = -std::sqrt(0.6);
                     xi[1] = 0.0;
                     xi[2] = -xi[0];
                     weights[0] = 5.0 / 9.0;

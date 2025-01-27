@@ -13,6 +13,7 @@
 #include "Tacho_CrsMatrixBase.hpp"
 #include "Tacho_Driver.hpp"
 
+using accelerator_space = Kokkos::DefaultExecutionSpace;
 using accelerator_type = typename Tacho::UseThisDevice<Kokkos::DefaultExecutionSpace>::type;
 
 using execution_space = Kokkos::DefaultHostExecutionSpace;
@@ -72,10 +73,7 @@ int main(int argc, char *argv[]) {
         {
             Kokkos::View<size_t*, execution_space> newRowPtr("Row Pointer for free degrees", size(freeToGlobal) + 1);
             int newNNZ = 0;
-            for (int i = 0; i < newRowPtr.size(); ++i) {
-                std::cout << " INIT " << i << " newRowPtr " << newRowPtr[i] << "\n";
-            }
-            Kokkos::parallel_reduce(size(freeToGlobal), KOKKOS_LAMBDA(int i, int &count){
+            Kokkos::parallel_reduce(Kokkos::RangePolicy<execution_space>(0, size(freeToGlobal)), KOKKOS_LAMBDA(int i, int &count){
                 auto gDof = freeToGlobal[i];
                 size_t iCount = 0;
                 for (auto k = matRowPtr[gDof]; k < matRowPtr[gDof + 1]; ++k) {
@@ -85,17 +83,10 @@ int main(int argc, char *argv[]) {
                 count += iCount;
             }, Kokkos::Sum<int>(newNNZ));
             //
-            for (int i = 0; i < newRowPtr.size(); ++i) {
-                std::cout << i << " newRowPtr " << newRowPtr[i] << "\n";
-            }
             auto h_rowPtr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), newRowPtr);
             for (int i = 0; i < h_rowPtr.size() - 1; ++i) {
                 h_rowPtr(i + 1) += h_rowPtr(i);
             }
-            for (int i = 0; i < h_rowPtr.size(); ++i) {
-                std::cout << i << " h_row " << h_rowPtr[i] << "\n";
-            }
-            //
             Kokkos::deep_copy(newRowPtr, h_rowPtr);
             //
             Kokkos::View<int*, execution_space> newColIdx("Col Idx for free degrees", newNNZ);
@@ -116,12 +107,6 @@ int main(int argc, char *argv[]) {
                 }
                 newRHS[iFree] = rhsValues[gdof];
             });
-            for (int i = 0; i < newRowPtr.size(); ++i) {
-                std::cout << i << " newRowPtr " << newRowPtr[i] << "\n";
-            }
-            for (int i = 0; i < newColIdx.size(); ++i) {
-                std::cout << i << " nnz " << newNNZ << " newColIdx " << newColIdx[i] << "\n";
-            }
             //
             Tacho::CrsMatrixBase<double, host_execution_type> h_A;
             auto const n = size(freeToGlobal);
@@ -152,11 +137,10 @@ int main(int argc, char *argv[]) {
             Kokkos::deep_copy(b0, newRHS);
             //
             double solve_time = 0.0;
-            const int nsolves = 6;
-            for (int i = 0; i < nsolves; ++i) {
-                timer.reset();
-                solver.solve(x, b, wt);
-                solve_time += timer.seconds();
+            timer.reset();
+            solver.solve(x, b, wt);
+            solve_time += timer.seconds();
+            {
                 const double res = solver.computeRelativeResidual(A.Values(), x, b);
                 std::cout << "TachoSolver: residual = " << res << "\n";
             }

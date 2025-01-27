@@ -17,11 +17,11 @@
 
 namespace IMSI {
 
-    void MapDegreesOfFreedom(const std::vector<int>& bdyNodes,
-                             std::vector<int>& globalToFree,
-                             std::vector<int>& freeToGlobal) {
+    void MapDegreesOfFreedom(const std::vector<int> &bdyNodes,
+                             std::vector<int> &globalToFree,
+                             std::vector<int> &freeToGlobal) {
         globalToFree.assign(size(globalToFree), 0);
-        for (auto ib : bdyNodes) {
+        for (auto ib: bdyNodes) {
             globalToFree[ib] = -1;
         }
         int icount = 0;
@@ -184,12 +184,11 @@ namespace IMSI {
 
     void OutputToGMSH
             (
-                    const char* fileName,
-                    const Mesh& grid,
+                    const char *fileName,
+                    const Mesh &grid,
                     double *p,
                     int numDofs
-            )
-    {
+            ) {
 
         std::ofstream fout(fileName);
 
@@ -202,7 +201,7 @@ namespace IMSI {
         fout << "$Nodes\n";
         fout << grid.NumberVertices() << std::endl;
         for (int iN = 0; iN < grid.NumberVertices(); ++iN) {
-            fout << iN+1 << " ";
+            fout << iN + 1 << " ";
             auto const coord = grid.GetVertex(iN);
             fout << coord[0] << " " << coord[1] << " " << coord[2];
             fout << std::endl;
@@ -225,7 +224,7 @@ namespace IMSI {
                 }
             }
             auto const nodeList = grid.NodeList(iE);
-            for (auto iN : nodeList) {
+            for (auto iN: nodeList) {
                 fout << iN + 1 << " ";
             }
             fout << std::endl;
@@ -245,8 +244,7 @@ namespace IMSI {
             fout << "1\n";
 
             fout << numDofs << "\n";
-            for (int in = 0; in < numDofs; ++in)
-            {
+            for (int in = 0; in < numDofs; ++in) {
                 fout << in + 1 << " " << p[in] << std::endl;
             }
             fout << "$EndNodeData\n";

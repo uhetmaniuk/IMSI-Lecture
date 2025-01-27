@@ -241,17 +241,17 @@ if (Vc_ENABLE_INSTALL)
 endif()
 
 #option(BUILD_TESTING "Build the testing tree." OFF)
-#include (CTest)
-#configure_file(${PROJECT_SOURCE_DIR}/CTestCustom.cmake ${PROJECT_BINARY_DIR}/CTestCustom.cmake COPYONLY)
 #if(BUILD_TESTING)
+#   include (CTest)
+#   configure_file(${PROJECT_SOURCE_DIR}/CTestCustom.cmake ${PROJECT_BINARY_DIR}/CTestCustom.cmake COPYONLY)
 #   add_custom_target(build_tests ALL VERBATIM)
 #   add_subdirectory(tests)
 #endif()
 
-set(BUILD_EXAMPLES TRUE CACHE BOOL "Build examples.")
-if(BUILD_EXAMPLES)
-   add_subdirectory(examples)
-endif(BUILD_EXAMPLES)
+#set(BUILD_EXAMPLES FALSE CACHE BOOL "Build examples.")
+#if(BUILD_EXAMPLES)
+#   add_subdirectory(examples)
+#endif(BUILD_EXAMPLES)
 
 # Hide Vc_IMPL as it is only meant for users of Vc
 mark_as_advanced(Vc_IMPL)

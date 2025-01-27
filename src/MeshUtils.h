@@ -47,19 +47,19 @@ namespace IMSI {
     Mesh GenerateMesh(DomainParams const &params, std::vector<double> corners = {});
 
     template<typename Device, typename Idx = int>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    CombineGraphs(const Kokkos::StaticCrsGraph <Idx, Device> &aTob, const Kokkos::StaticCrsGraph <Idx, Device> &bToc);
+    Kokkos::StaticCrsGraph<Idx, Device>
+    CombineGraphs(const Kokkos::StaticCrsGraph<Idx, Device> &aTob, const Kokkos::StaticCrsGraph<Idx, Device> &bToc);
 
     template<typename Device, typename Idx = int>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    TransposeGraph(const Kokkos::StaticCrsGraph <Idx, Device> &aTob, int numRowsB);
+    Kokkos::StaticCrsGraph<Idx, Device>
+    TransposeGraph(const Kokkos::StaticCrsGraph<Idx, Device> &aTob, int numRowsB);
 
     template<typename Device, typename Idx = int>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    ColorGraph(const Kokkos::StaticCrsGraph <Idx, Device> &e2e);
+    Kokkos::StaticCrsGraph<Idx, Device>
+    ColorGraph(const Kokkos::StaticCrsGraph<Idx, Device> &e2e);
 
     template<typename Device, typename Idx = int>
-    void SortEntries(Kokkos::StaticCrsGraph <Idx, Device> &g);
+    void SortEntries(Kokkos::StaticCrsGraph<Idx, Device> &g);
 
     template<typename Device = Kokkos::DefaultHostExecutionSpace>
     MeshConnectivity<Device> GetMeshConnectivity(const Mesh &grid);
@@ -78,8 +78,8 @@ namespace IMSI {
 namespace IMSI {
 
     template<typename Device, typename Idx>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    CombineGraphs(const Kokkos::StaticCrsGraph <Idx, Device> &aTob, const Kokkos::StaticCrsGraph <Idx, Device> &bToc) {
+    Kokkos::StaticCrsGraph<Idx, Device>
+    CombineGraphs(const Kokkos::StaticCrsGraph<Idx, Device> &aTob, const Kokkos::StaticCrsGraph<Idx, Device> &bToc) {
         typedef Kokkos::StaticCrsGraph<Idx, Device> OutputGraph;
         using row_map_type = typename OutputGraph::row_map_type::non_const_type;
         using entries_type = typename OutputGraph::entries_type::non_const_type;
@@ -149,8 +149,8 @@ namespace IMSI {
     }
 
     template<typename Device, typename Idx>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    TransposeGraph(const Kokkos::StaticCrsGraph <Idx, Device> &aTob, int numRowsB) {
+    Kokkos::StaticCrsGraph<Idx, Device>
+    TransposeGraph(const Kokkos::StaticCrsGraph<Idx, Device> &aTob, int numRowsB) {
         typedef Kokkos::StaticCrsGraph<Idx, Device> OutputGraph;
         using row_map_type = typename OutputGraph::row_map_type::non_const_type;
         using entries_type = typename OutputGraph::entries_type::non_const_type;
@@ -169,7 +169,7 @@ namespace IMSI {
     }
 
     template<typename Device, typename Idx>
-    void SortEntries(Kokkos::StaticCrsGraph <Idx, Device> &g) {
+    void SortEntries(Kokkos::StaticCrsGraph<Idx, Device> &g) {
         auto h_row = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), g.row_map);
         auto h_entries = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), g.entries);
         // Sort on the host
@@ -182,8 +182,8 @@ namespace IMSI {
     }
 
     template<typename Device, typename Idx>
-    Kokkos::StaticCrsGraph <Idx, Device>
-    ColorGraph(const Kokkos::StaticCrsGraph <Idx, Device> &e2e) {
+    Kokkos::StaticCrsGraph<Idx, Device>
+    ColorGraph(const Kokkos::StaticCrsGraph<Idx, Device> &e2e) {
         typedef Kokkos::StaticCrsGraph<Idx, Device> OutputGraph;
         using row_map_type = typename OutputGraph::row_map_type::non_const_type;
         using entries_type = typename OutputGraph::entries_type::non_const_type;

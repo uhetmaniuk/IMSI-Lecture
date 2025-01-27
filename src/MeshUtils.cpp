@@ -15,7 +15,7 @@ namespace IMSI {
         int const nX = params.numElePerDir[0];
         int const nY = (dim < 2) ? 0 : params.numElePerDir[1];
         int const nZ = (dim < 3) ? 0 : params.numElePerDir[2];
-        int const numCells = (dim == 1) ? nX : ((dim == 2) ? nX * nY: nX * nY * nZ);
+        int const numCells = (dim == 1) ? nX : ((dim == 2) ? nX * nY : nX * nY * nZ);
         auto const Lx = params.upperCorner[0] - params.lowerCorner[0];
         auto const Ly = (dim < 2) ? 0 : params.upperCorner[1] - params.lowerCorner[1];
         auto const Lz = (dim < 3) ? 0 : params.upperCorner[2] - params.lowerCorner[2];
@@ -208,11 +208,11 @@ namespace IMSI {
                                 if ((iX == 0) || (iX == nX) || (iY == 0) || (iY == nY)) {
                                     boundaryNode.push_back(vList.size());
                                 }
-                        } else if constexpr (dim == 3) {
+                            } else if constexpr (dim == 3) {
                                 if ((iX == 0) || (iX == nX) || (iY == 0) || (iY == nY) || (iZ == 0) || (iZ == nZ)) {
                                     boundaryNode.push_back(vList.size());
                                 }
-                        }
+                            }
                             coord[0] = params.lowerCorner[0] + iX * hX;
                             coord[1] = params.lowerCorner[1] + iY * hY;
                             coord[2] = params.lowerCorner[2] + iZ * hZ;
@@ -231,12 +231,14 @@ namespace IMSI {
         switch (params.omega) {
             case DomainType::InputFile: {
                 /// To Be Implemented
+                break;
             }
             case DomainType::Bar: {
                 return GenerateUniformTensor<1>(params);
             }
             case DomainType::Trapeze: {
                 /// To Be Implemented
+                break;
             }
             case DomainType::Rectangle: {
                 return GenerateUniformTensor<2>(params);
@@ -245,6 +247,8 @@ namespace IMSI {
                 return GenerateUniformTensor<3>(params);
             }
         }
+
+        return {};
 
     }
 
