@@ -200,9 +200,19 @@ namespace IMSI {
                 for (int iZ = 0; iZ <= nZ; ++iZ) {
                     for (int iY = 0; iY <= nY; ++iY) {
                         for (int iX = 0; iX <= nX; ++iX) {
-                            if ((iX == 0) || (iX == nX) || (iY == 0) || (iY == nY) || (iZ == 0) || (iZ == nZ)) {
-                                boundaryNode.push_back(vList.size());
-                            }
+                            if constexpr (dim == 1) {
+                                if ((iX == 0) || (iX == nX)) {
+                                    boundaryNode.push_back(vList.size());
+                                }
+                            } else if constexpr (dim == 2) {
+                                if ((iX == 0) || (iX == nX) || (iY == 0) || (iY == nY)) {
+                                    boundaryNode.push_back(vList.size());
+                                }
+                        } else if constexpr (dim == 3) {
+                                if ((iX == 0) || (iX == nX) || (iY == 0) || (iY == nY) || (iZ == 0) || (iZ == nZ)) {
+                                    boundaryNode.push_back(vList.size());
+                                }
+                        }
                             coord[0] = params.lowerCorner[0] + iX * hX;
                             coord[1] = params.lowerCorner[1] + iY * hY;
                             coord[2] = params.lowerCorner[2] + iZ * hZ;

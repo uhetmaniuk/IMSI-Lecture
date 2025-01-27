@@ -20,6 +20,10 @@ namespace IMSI {
             vertex_z[count] = coord[2];
             count += 1;
         }
+        //
+        if (!std::is_sorted(boundaryNode.begin(), boundaryNode.end())) {
+            std::sort(boundaryNode.begin(), boundaryNode.end());
+        }
     }
 
     std::ostream &operator<<

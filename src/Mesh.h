@@ -24,7 +24,7 @@ namespace IMSI {
     std::vector< std::vector<int> > cellToNode;
 
     /// \brief Array of node indices lying on the domain surface
-    /// \note This structure should be generated for general boundary conditions.
+    /// \note This structure should be generalized for other boundary conditions.
     std::vector< int > boundaryNode;
 
   public:
@@ -76,6 +76,10 @@ namespace IMSI {
 
       [[nodiscard]] auto GetSpatialDimension() const {
         return sdim;
+    }
+
+    [[nodiscard]] const std::vector<int>& GetBoundaryNodes() const {
+        return boundaryNode;
     }
 
     /// Overloads the output operator <<.
