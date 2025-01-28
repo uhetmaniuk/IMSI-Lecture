@@ -24,6 +24,9 @@ Sandia National Laboratories, Albuquerque, NM, USA
 #if defined(TACHO_HAVE_METIS)
 #include "Tacho_GraphTools_Metis.hpp"
 
+/// \note This routine is not available when building Tacho on its own.
+//#include "trilinos_amd.h"
+
 namespace Tacho {
 
 GraphTools_Metis::GraphTools_Metis() = default;
@@ -65,6 +68,7 @@ void GraphTools_Metis::setOption(const int id, const idx_t value) { _options[id]
 ///
 /// reorder by amd
 ///
+/*
 template <typename ordering_type>
 ordering_type GraphTools_Metis::amd_order (ordering_type n, const ordering_type *xadj, const ordering_type *adjncy, ordering_type *perm, double *control, double *info) {
   if constexpr (std::is_same_v<ordering_type, long>) {
@@ -80,6 +84,7 @@ ordering_type GraphTools_Metis::amd_order (ordering_type n, const ordering_type 
     return TRILINOS_AMD_INVALID;
   }
 }
+*/
 
 ///
 /// reorder by metis or amd
@@ -95,6 +100,7 @@ void GraphTools_Metis::reorder(const ordinal_type verbose) {
       _perm(i) = i;
       _peri(i) = i;
     }
+    /*
   } else if (algo == 1) {
     int ierr = 0;
     double amd_info[TRILINOS_AMD_INFO];
@@ -109,6 +115,7 @@ void GraphTools_Metis::reorder(const ordinal_type verbose) {
     }
 
     TACHO_TEST_FOR_EXCEPTION(ierr != METIS_OK, std::runtime_error, "Failed in trilinos_amd");
+     */
   } else {
     int ierr = 0;
 

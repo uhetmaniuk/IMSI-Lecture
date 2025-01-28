@@ -27,7 +27,6 @@ Sandia National Laboratories, Albuquerque, NM, USA
 #if defined(TACHO_HAVE_METIS)
 #include "Tacho_Graph.hpp"
 
-#include "trilinos_amd.h"
 #include "metis.h"
 
 namespace Tacho {
@@ -70,11 +69,15 @@ public:
   void setVerbose(const bool verbose);
   void setOption(const int id, const idx_t value);
 
+/*
+  /// \brief
+  /// \note This routine is not available when building Tacho on its own.
   template <typename ordering_type>
   ordering_type amd_order(ordering_type n, const ordering_type *xadj,
                                            const ordering_type *adjncy,
                           ordering_type *perm,
                           double *control, double *info);
+*/
 
   ///
   /// reorder by metis

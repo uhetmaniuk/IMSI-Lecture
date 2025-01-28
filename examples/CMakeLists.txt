@@ -10,7 +10,7 @@ target_include_directories(Laplace1D.exe
 
 target_link_libraries(Laplace1D.exe
   PUBLIC
-  tacho Kokkos::kokkoskernels Kokkos::kokkos
+  tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
 )
 
 #
@@ -28,5 +28,5 @@ target_include_directories(simdPolar.exe
 
 target_link_libraries(simdPolar.exe
         PUBLIC
-        Kokkos::kokkos Vc
+        Kokkos::kokkos Vc ${EXTRALIB}
 )

@@ -12,18 +12,20 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 option(USE_MKL "Use MKL" OFF)
 IF (USE_MKL)
    find_package(MKL REQUIRED)
-if (BLAS_mkl_core_LIBRARY)
-    message("BLAS seems to be MKL")
-    get_filename_component(MKL_LIB_Base ${BLAS_mkl_core_LIBRARY} DIRECTORY)
-    get_filename_component(MKL_Base ${MKL_LIB_Base} DIRECTORY)
-    find_path(MKL_INCLUDE_PATH "mkl.h" HINTS ${MKL_Base} PATH_SUFFIXES include)
-    message("MKL_INCLUDE_PATH ${MKL_INCLUDE_PATH}")
-endif()
+   if (BLAS_mkl_core_LIBRARY)
+       message("BLAS seems to be MKL")
+       get_filename_component(MKL_LIB_Base ${BLAS_mkl_core_LIBRARY} DIRECTORY)
+       get_filename_component(MKL_Base ${MKL_LIB_Base} DIRECTORY)
+       find_path(MKL_INCLUDE_PATH "mkl.h" HINTS ${MKL_Base} PATH_SUFFIXES include)
+       message("MKL_INCLUDE_PATH ${MKL_INCLUDE_PATH}")
+   endif()
+   SET(TPL_ENABLE_MKL ON)
 ENDIF (USE_MKL)
 
 find_package(BLAS)
 if (BLAS_FOUND)
     set (EXTRALIB ${EXTRALIB} ${BLAS_LIBRARIES})
+    SET(TPL_ENABLE_BLAS ON)
     if (USE_MKL)
         SET (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DWITH_MKL")
     else()
@@ -40,8 +42,15 @@ endif(BLAS_FOUND)
 
 find_package(LAPACK)
 IF (LAPACK_FOUND)
-   SET (EXTRALIB ${EXTRALIB} ${LAPACK_LIBRARIES})
+    SET (EXTRALIB ${EXTRALIB} ${LAPACK_LIBRARIES})
+    SET(TPL_ENABLE_LAPACK ON)
 ENDIF (LAPACK_FOUND)
+
+find_package(METIS)
+IF (METIS_FOUND)
+    SET (EXTRALIB ${EXTRALIB} ${METIS_LIBRARIES})
+    SET(TPL_ENABLE_METIS ON)
+ENDIF (METIS_FOUND)
 
 add_subdirectory(TPL)
 add_subdirectory(src)
@@ -58,5 +67,5 @@ target_include_directories(main.exe
 
 target_link_libraries(main.exe
         PUBLIC
-        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
 )

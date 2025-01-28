@@ -1,0 +1,3 @@
+
+cmake .. -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=native
+

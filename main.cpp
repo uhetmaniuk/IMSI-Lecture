@@ -29,8 +29,8 @@ int main(int argc, char *argv[]) {
         std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
         //
         IMSI::DomainParams dParams;
-        dParams.numElePerDir[0] = 6;
-        dParams.numElePerDir[1] = 7;
+        dParams.numElePerDir[0] = 1024;
+        dParams.numElePerDir[1] = 1024;
         //
         auto start = std::chrono::high_resolution_clock::now();
         auto myMesh = IMSI::GenerateMesh(dParams);
