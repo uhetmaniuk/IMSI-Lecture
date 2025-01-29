@@ -11,9 +11,7 @@
 
 int main(int argc, char **argv) {
 
-    const int nNode = 16;
-    const int dim = 2;
-    const int rep = 5000;
+    const int rep = 10000;
     double sum = 0.;
     using real = float;
 
@@ -26,7 +24,7 @@ int main(int argc, char **argv) {
         std::cout << " int64 Kokkos " << Kokkos::Experimental::native_simd<int64_t>::size() << " Vc " << Vc::int64_v::size()<< "\n";
 
         std::cout << "\n";
-        std::cout << " p   |   for Loop   for Comp.        Vc          Kokkos";
+        std::cout << " p   |   for Loop   for Comp.      Vc         Kokkos";
         std::cout << "\n";
 
         for (int pk = 4096; pk < 10000; pk *= 2) {
@@ -45,7 +43,7 @@ int main(int argc, char **argv) {
 
                 std::vector<real> r(p);
                 sum = 0.0;
-                std::chrono::duration<double> dt22(0);
+                std::chrono::duration<double> dt_ref(0);
                 for (int ir = 0; ir < rep; ++ir) {
                     auto start = std::chrono::high_resolution_clock::now();
 #pragma clang loop vectorize(disable) interleave(disable)
@@ -53,10 +51,10 @@ int main(int argc, char **argv) {
                         r[jj] = x[jj] * x[jj] + y[jj] * y[jj] + z[jj] * z[jj];
                     }
                     auto end = std::chrono::high_resolution_clock::now();
-                    dt22 += end - start;
+                    dt_ref += end - start;
                     sum += r[0] + r[p - 1];
                 }
-                std::cout << dt22.count() / p << "   ";
+                std::cout << "      1      ";
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
@@ -76,7 +74,7 @@ int main(int argc, char **argv) {
                     dt88 += end - start;
                     sum += r[0] + r[p - 1];
                 }
-                std::cout << dt88.count() / p << "   ";
+                std::cout << dt_ref.count() / dt88.count() << "   ";
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
@@ -106,7 +104,7 @@ int main(int argc, char **argv) {
                     dt44 += end - start;
                     sum += r[0] + r[p - 1];
                 }
-                std::cout << dt44.count() /p << "  ";
+                std::cout << "  " << dt_ref.count() / dt44.count() << "  ";
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
@@ -133,7 +131,7 @@ int main(int argc, char **argv) {
                     dt33 += end - start;
                     sum += r[0] + r[p - 1];
                 }
-                std::cout << dt33.count() / p << "  ";
+                std::cout << dt_ref.count() / dt33.count() << "  ";
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
