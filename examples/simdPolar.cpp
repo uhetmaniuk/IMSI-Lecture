@@ -2,8 +2,6 @@
 #include <Kokkos_Random.hpp>
 #include <Kokkos_SIMD.hpp>
 
-#include <Vc/Vc>
-
 #include <cmath>
 #include <immintrin.h>
 #include <iostream>
@@ -18,13 +16,13 @@ int main(int argc, char **argv) {
     Kokkos::initialize(argc, argv);
     {
         using simd_type = Kokkos::Experimental::native_simd<real>;
-        std::cout << "double Kokkos " << Kokkos::Experimental::native_simd<double>::size() << " Vc " << Vc::double_v::size() << "\n";
-        std::cout << " float Kokkos " << Kokkos::Experimental::native_simd<float>::size() << " Vc " << Vc::float_v::size()<< "\n";
-        std::cout << " int32 Kokkos " << Kokkos::Experimental::native_simd<int32_t>::size() << " Vc " << Vc::int32_v::size()<< "\n";
-        std::cout << " int64 Kokkos " << Kokkos::Experimental::native_simd<int64_t>::size() << " Vc " << Vc::int64_v::size()<< "\n";
+        std::cout << "double Kokkos " << Kokkos::Experimental::native_simd<double>::size() << "\n";
+        std::cout << " float Kokkos " << Kokkos::Experimental::native_simd<float>::size() << "\n";
+        std::cout << " int32 Kokkos " << Kokkos::Experimental::native_simd<int32_t>::size() << "\n";
+        std::cout << " int64 Kokkos " << Kokkos::Experimental::native_simd<int64_t>::size() << "\n";
 
         std::cout << "\n";
-        std::cout << " p   |   for Loop   for Comp.      Vc         Kokkos";
+        std::cout << " p   |   for Loop   for Comp.      Kokkos";
         std::cout << "\n";
 
         for (int pk = 4096; pk < 10000; pk *= 2) {
@@ -78,6 +76,7 @@ int main(int argc, char **argv) {
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
 
+/*
                 sum = 0.0;
                 r.assign(r.size(), 0.0);
                 std::chrono::duration<double> dt44(0);
@@ -107,6 +106,7 @@ int main(int argc, char **argv) {
                 std::cout << "  " << dt_ref.count() / dt44.count() << "  ";
                 //--- Use for debugging
                 // std::cout << " sum " << sum << "\n";
+*/
 
                 using tag_type = Kokkos::Experimental::element_aligned_tag;
                 constexpr int width = int(simd_type::size());

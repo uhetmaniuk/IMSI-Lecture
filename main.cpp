@@ -32,11 +32,14 @@ int main(int argc, char *argv[]) {
         dParams.numElePerDir[0] = 1024;
         dParams.numElePerDir[1] = 1024;
         //
+        std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
+        //
         auto start = std::chrono::high_resolution_clock::now();
         auto myMesh = IMSI::GenerateMesh(dParams);
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> dt = end - start;
         std::cout << " --- Generate Mesh = " << dt.count() << "\n";
+        std::cout << " Vertices = " << myMesh.NumberVertices() << "\n";
         //
         start = std::chrono::high_resolution_clock::now();
         auto meshData = IMSI::GetMeshConnectivity(myMesh);

@@ -23,10 +23,10 @@ add_executable(
 
 target_include_directories(simdPolar.exe
         PUBLIC
-        Kokkos::kokkos Vc
+        Kokkos::kokkos
 )
 
 target_link_libraries(simdPolar.exe
         PUBLIC
-        Kokkos::kokkos Vc ${EXTRALIB}
+        Kokkos::kokkos ${EXTRALIB}
 )
