@@ -1,3 +1,3 @@
 
-cmake .. -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=native
+cmake .. -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON -DKokkos_ARCH_NATIVE=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=native -ffast-math"
 
