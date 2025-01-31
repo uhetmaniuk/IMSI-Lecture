@@ -34,7 +34,7 @@ namespace IMSI {
             auto const c = cos(150 * x);
             auto const s = sin(150 * y);
             return double(1 + 100 * c * c * s * s); };
-        const std::optional< std::function<double(double, double, double)> > u = nullopt;
+        const std::optional< std::function<double(double, double, double)> > u = std::nullopt;
     };
 
 }

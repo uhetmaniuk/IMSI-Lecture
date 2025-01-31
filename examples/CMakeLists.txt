@@ -30,3 +30,22 @@ target_link_libraries(simdPolar.exe
         PUBLIC
         Kokkos::kokkos ${EXTRALIB}
 )
+
+#
+# Example for testing TeamPolicy
+#
+add_executable(
+        TeamPolicy.exe
+        team_policy_solution.cpp
+)
+
+target_include_directories(TeamPolicy.exe
+        PUBLIC
+        Kokkos::kokkos
+)
+
+target_link_libraries(TeamPolicy.exe
+        PUBLIC
+        Kokkos::kokkos ${EXTRALIB}
+)
+
