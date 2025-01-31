@@ -264,4 +264,228 @@ namespace IMSI {
         }
     }
 
+template <typename Device>
+void
+ScaledLaplacian::GetLinearSystem_v(
+    Kokkos::View<double*, Device> rhs,
+    Kokkos::View<size_t*, Device> matRowPtr,
+    Kokkos::View<int*, Device>    matColIdx,
+    Kokkos::View<double*, Device> matValues) const
+{
+  size_t maxNumDofsPerEle = 0;
+  Kokkos::parallel_reduce(
+      "MaxDofsPerEle",
+      Kokkos::RangePolicy<Device>(0, meshInfo.mesh.NumberCells()),
+      KOKKOS_LAMBDA(const int& i, size_t& nMax) { nMax = std::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i))); },
+      Kokkos::Max<size_t>(maxNumDofsPerEle));
+
+  auto const& c2e  = meshInfo.c2e;
+  auto const  sdim = meshInfo.mesh.GetSpatialDimension();
+
+  const int vecSize = Kokkos::Experimental::native_simd<double>::size();
+
+  for (int ic = 0; ic < c2e.numRows(); ++ic) {
+    auto const eleList = c2e.rowConst(ic);
+    Kokkos::parallel_for(
+        Kokkos::TeamPolicy<Device>(Kokkos::num_threads(), 1),
+        KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
+          auto const             klen = (eleList.length + team.league_size() - 1) / team.league_size();
+          auto const             kptr = team.team_rank() + klen * team.league_rank();
+          std::vector<simd_type> rele_v(maxNumDofsPerEle);
+          std::vector<simd_type> kele_v(maxNumDofsPerEle * maxNumDofsPerEle);
+          int                    jj = 0;
+          for (; jj + vecSize <= klen; jj += vecSize) {
+            //
+            // Element type for eleID
+            // !!! WARNING !!! This step assumes that the 'vecSize' elements are of the same type.
+            //
+            auto const ik       = kptr + jj;
+            if (ik + vecSize > eleList.length) {
+              break;
+            }
+            auto const eleID    = eleList(ik);
+            int        numNodes = 0;
+            switch (meshInfo.mesh.GetCellType(eleID)) {
+              default:
+              case ElementType::Q1: {
+                switch (sdim) {
+                  case 1: {
+                    // fe1DQ1 element;
+                    // this->ElementaryDataLagrangeFE<1, 2, fe1DQ1>(element, nodeList, &rele[0],
+                    //                                              &kele[0]);
+                    // break;
+                  }
+                  default:
+                  case 2: {
+                    //
+                    numNodes = fe2DQ1::numNode;
+                    rele_v.assign(numNodes, simd_type(0));
+                    kele_v.assign(numNodes * numNodes, simd_type(0));
+                    //
+                    std::array<simd_type, fe2DQ1::numNode * fe2DQ1::sdim> coords_v{};
+                    {
+                      std::array<double, fe2DQ1::numNode * fe2DQ1::sdim * vecSize> coords{};
+                      for (int jE = 0; jE < vecSize; ++jE) {
+                        auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
+                        for (int i = 0; i < fe2DQ1::numNode; ++i) {
+                          auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
+                          for (int k = 0; k < fe2DQ1::sdim; ++k) {
+                            coords[jE + k * vecSize + i * fe2DQ1::sdim * vecSize] = vertex[k];
+                          }
+                        }
+                      }
+                      for (int i = 0; i < fe2DQ1::numNode * fe2DQ1::sdim; ++i) {
+                        coords_v[i].copy_from(&coords[i * vecSize], Kokkos::Experimental::element_aligned_tag());
+                      }
+                    }
+                    //
+                    fe2DQ1 element;
+                    this->ElementaryDataLagrangeFE_v<fe2DQ1::sdim, fe2DQ1::numNode, fe2DQ1>(
+                        element, coords_v, &rele_v[0], &kele_v[0]);
+                    break;
+                  }
+                  case 3: {
+                    // fe3DQ1 element;
+                    // this->ElementaryDataLagrangeFE<3, 8, fe3DQ1>(element, nodeList, &rele[0],
+                    //                                              &kele[0]);
+                    // break;
+                  }
+                }
+                break;
+              }
+              case ElementType::Q2: {
+                switch (sdim) {
+                  case 1: {
+                    // fe1DQ2 element;
+                    // this->ElementaryDataLagrangeFE<1, 3, fe1DQ2>(element, nodeList, &rele[0],
+                    //                                              &kele[0]);
+                    // break;
+                  }
+                  default:
+                  case 2: {
+                    // fe2DQ2 element;
+                    // this->ElementaryDataLagrangeFE<2, 9, fe2DQ2>(element, nodeList, &rele[0],
+                    //                                              &kele[0]);
+                    // break;
+                  }
+                  case 3: {
+                    // fe3DQ2 element;
+                    // this->ElementaryDataLagrangeFE<3, 27, fe3DQ2>(element, nodeList, &rele[0],
+                    //                                               &kele[0]);
+                    // break;
+                  }
+                }
+              }
+            }
+            //
+            {
+              std::vector<double> rele(numNodes * vecSize);
+              for (int i = 0; i < numNodes; ++i) {
+                rele_v[i].copy_to(&rele[i * vecSize], Kokkos::Experimental::element_aligned_tag());
+              }
+              for (int jE = 0; jE < vecSize; ++jE) {
+                auto const& nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
+                for (int in = 0; in < size(nodeList); ++in) { rhs(nodeList[in]) += rele[jE + in * vecSize]; }
+              }
+            }
+            //
+            {
+              std::vector<double> kele(numNodes * numNodes * vecSize);
+              for (int i = 0; i < numNodes * numNodes; ++i) {
+                kele_v[i].copy_to(&kele[i * vecSize], Kokkos::Experimental::element_aligned_tag());
+              }
+              for (int jE = 0; jE < vecSize; ++jE) {
+                auto const& nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
+                for (int in = 0; in < size(nodeList); ++in) {
+                  auto const irow     = nodeList[in];
+                  auto const colBegin = &matColIdx(matRowPtr(irow));
+                  auto const colEnd   = &matColIdx(matRowPtr(irow + 1));
+                  for (int jn = 0; jn < size(nodeList); ++jn) {
+                    auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
+                    matValues(matRowPtr(irow) + pos) += kele[jE + in * vecSize + jn * numNodes * vecSize];
+                  }
+                }
+              }
+            }
+          }
+          //
+          // Treat the remaining elements if needed
+          //
+          std::vector<double> rele(maxNumDofsPerEle);
+          std::vector<double> kele(maxNumDofsPerEle * maxNumDofsPerEle);
+          for (; jj < klen; jj += 1) {
+            auto const ik       = kptr + jj;
+            if (ik >= eleList.length) {
+              break;
+            }
+            auto const eleID    = eleList(ik);
+            auto       nodeList = meshInfo.mesh.NodeList(eleID);
+            //
+            rele.assign(size(nodeList), 0);
+            kele.assign(size(nodeList) * size(nodeList), 0);
+            //
+            // Element type for eleID
+            //
+            switch (meshInfo.mesh.GetCellType(eleID)) {
+              default:
+              case ElementType::Q1: {
+                switch (sdim) {
+                  case 1: {
+                    fe1DQ1 element;
+                    this->ElementaryDataLagrangeFE<1, 2, fe1DQ1>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                  default:
+                  case 2: {
+                    fe2DQ1 element;
+                    this->ElementaryDataLagrangeFE<2, 4, fe2DQ1>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                  case 3: {
+                    fe3DQ1 element;
+                    this->ElementaryDataLagrangeFE<3, 8, fe3DQ1>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                }
+                break;
+              }
+              case ElementType::Q2: {
+                switch (sdim) {
+                  case 1: {
+                    fe1DQ2 element;
+                    this->ElementaryDataLagrangeFE<1, 3, fe1DQ2>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                  default:
+                  case 2: {
+                    fe2DQ2 element;
+                    this->ElementaryDataLagrangeFE<2, 9, fe2DQ2>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                  case 3: {
+                    fe3DQ2 element;
+                    this->ElementaryDataLagrangeFE<3, 27, fe3DQ2>(element, nodeList, &rele[0], &kele[0]);
+                    break;
+                  }
+                }
+              }
+            }
+            //
+            for (int in = 0; in < size(nodeList); ++in) { rhs(nodeList[in]) += rele[in]; }
+            //
+            for (int in = 0; in < size(nodeList); ++in) {
+              auto const irow     = nodeList[in];
+              auto const colBegin = &matColIdx(matRowPtr(irow));
+              auto const colEnd   = &matColIdx(matRowPtr(irow + 1));
+              for (int jn = 0; jn < size(nodeList); ++jn) {
+                auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
+                matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
+              }
+            }
+          }  // for (; jj < kLen; jj += 1)
+        });
+    Kokkos::fence();
+  }  // for (int ic = 0; ic < ; ++ic)
+}
+
 }
