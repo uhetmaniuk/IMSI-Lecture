@@ -31,6 +31,8 @@ main(int argc, char* argv[])
     IMSI::DomainParams dParams;
     dParams.numElePerDir[0] = 1024;
     dParams.numElePerDir[1] = 1024;
+    dParams.omega = IMSI::DomainType::Rectangle;
+    dParams.cellType = IMSI::ElementType::Q2;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
     //
@@ -57,8 +59,8 @@ main(int argc, char* argv[])
     //
     const IMSI::ParabolicPb problem;
     start = std::chrono::high_resolution_clock::now();
-    IMSI::ScaledLaplacian dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 2);
-    dataAssembly.GetLinearSystem(rhsValues, matRowPtr, matColIdx, matValues);
+    IMSI::ScaledLaplacian dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 3);
+    dataAssembly.GetLinearSystem_v(rhsValues, matRowPtr, matColIdx, matValues);
     end = std::chrono::high_resolution_clock::now();
     dt  = end - start;
     std::cout << " --- GetLinearSystem = " << dt.count() << "\n";

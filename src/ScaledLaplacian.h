@@ -496,10 +496,31 @@ ScaledLaplacian::GetLinearSystem_v(
                   }
                   default:
                   case 2: {
-                    // fe2DQ2 element;
-                    // this->ElementaryDataLagrangeFE<2, 9, fe2DQ2>(element, nodeList, &rele[0],
-                    //                                              &kele[0]);
-                    // break;
+                    numNodes = fe2DQ2::numNode;
+                    rele_v.assign(numNodes, simd_type(0));
+                    kele_v.assign(numNodes * numNodes, simd_type(0));
+                    //
+                    std::array<simd_type, fe2DQ2::numNode * fe2DQ2::sdim> coords_v{};
+                    {
+                      std::array<double, fe2DQ2::numNode * fe2DQ2::sdim * vecSize> coords{};
+                      for (int jE = 0; jE < vecSize; ++jE) {
+                        auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
+                        for (int i = 0; i < fe2DQ2::numNode; ++i) {
+                          auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
+                          for (int k = 0; k < fe2DQ2::sdim; ++k) {
+                            coords[jE + k * vecSize + i * fe2DQ2::sdim * vecSize] = vertex[k];
+                          }
+                        }
+                      }
+                      for (int i = 0; i < fe2DQ2::numNode * fe2DQ2::sdim; ++i) {
+                        coords_v[i].copy_from(&coords[i * vecSize], Kokkos::Experimental::element_aligned_tag());
+                      }
+                    }
+                    //
+                    fe2DQ2 element;
+                    this->ElementaryDataLagrangeFE_v<fe2DQ2::sdim, fe2DQ2::numNode, fe2DQ2>(
+                        element, coords_v, &rele_v[0], &kele_v[0]);
+                    break;
                   }
                   case 3: {
                     // fe3DQ2 element;

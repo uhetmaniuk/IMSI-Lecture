@@ -176,10 +176,19 @@ namespace IMSI {
                 for (int iZ = 0; iZ <= twoNZ; ++iZ) {
                     for (int iY = 0; iY <= twoNY; ++iY) {
                         for (int iX = 0; iX <= twoNX; ++iX) {
-                            if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY) || (iZ == 0) ||
-                                (iZ == twoNZ)) {
-                                boundaryNode.push_back(int(vList.size()));
+                          if constexpr (dim == 1) {
+                            if ((iX == 0) || (iX == twoNX)) {
+                              boundaryNode.push_back(vList.size());
                             }
+                          } else if constexpr (dim == 2) {
+                            if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY)) {
+                              boundaryNode.push_back(vList.size());
+                            }
+                          } else if constexpr (dim == 3) {
+                            if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY) || (iZ == 0) || (iZ == twoNZ)) {
+                              boundaryNode.push_back(vList.size());
+                            }
+                          }
                             coord[0] = 0.5 * iX * hX;
                             coord[1] = 0.5 * iY * hY;
                             coord[2] = 0.5 * iZ * hZ;
