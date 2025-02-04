@@ -156,11 +156,15 @@ namespace IMSI {
         ///typedef Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::DefaultHostExecutionSpace::memory_space> device_type;
 
         size_t maxNumDofsPerEle = 0;
-        Kokkos::parallel_reduce("MaxDofsPerEle",
-                                Kokkos::RangePolicy<Device>(0, meshInfo.mesh.NumberCells()),
-                                KOKKOS_LAMBDA(const int &i, size_t &nMax) {
-                                    nMax = std::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i)));
-                                }, Kokkos::Max<size_t>(maxNumDofsPerEle));
+        {
+          auto const& myGrid = meshInfo.mesh;
+          Kokkos::parallel_reduce("MaxDofsPerEle",
+                                  Kokkos::RangePolicy<Device>(0, myGrid.NumberCells()),
+                                  KOKKOS_LAMBDA(const int &i, size_t &nMax) {
+                                      auto const& list = myGrid.NodeList(i);
+                                      nMax = std::max<size_t>(nMax, list.size()));
+                                  }, Kokkos::Max<size_t>(maxNumDofsPerEle));
+        }
 
         auto const &c2e = meshInfo.c2e;
         auto const sdim = meshInfo.mesh.GetSpatialDimension();
@@ -243,15 +247,15 @@ namespace IMSI {
                                     }
                                 }
                                 //
-                                for (int in = 0; in < size(nodeList); ++in) {
+                                for (int in = 0; in < nodeList.size(); ++in) {
                                     rhs(nodeList[in]) += rele[in];
                                 }
                                 //
-                                for (int in = 0; in < size(nodeList); ++in) {
+                                for (int in = 0; in < nodeList.size(); ++in) {
                                     auto const irow = nodeList[in];
                                     auto const colBegin = &matColIdx(matRowPtr(irow));
                                     auto const colEnd = &matColIdx(matRowPtr(irow + 1));
-                                    for (int jn = 0; jn < size(nodeList); ++jn) {
+                                    for (int jn = 0; jn < nodeList.size(); ++jn) {
                                         auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
                                         matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
                                     }
