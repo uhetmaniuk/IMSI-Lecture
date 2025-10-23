@@ -12,10 +12,10 @@
 #include "src/Utils.h"
 
 using accelerator_space = Kokkos::DefaultExecutionSpace;
-using accelerator_type  = typename Tacho::UseThisDevice<Kokkos::DefaultExecutionSpace>::type;
+using accelerator_type = typename Kokkos::Device<accelerator_space, accelerator_space::memory_space>;
 
-using execution_space     = Kokkos::DefaultHostExecutionSpace;
-using host_execution_type = typename Tacho::UseThisDevice<execution_space>::type;
+using host_execution_space     = Kokkos::DefaultHostExecutionSpace;
+using host_execution_type = typename Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::HostSpace>;
 
 int
 main(int argc, char* argv[])
@@ -29,8 +29,8 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 1024;
-    dParams.numElePerDir[1] = 1024;
+    dParams.numElePerDir[0] = 384;
+    dParams.numElePerDir[1] = 384;
     dParams.omega = IMSI::DomainType::Rectangle;
     dParams.cellType = IMSI::ElementType::Q2;
     //
@@ -50,12 +50,12 @@ main(int argc, char* argv[])
     std::cout << " --- Get Mesh Connectivities = " << dt.count() << "\n";
     //
     auto const                             numDofs = meshData.mesh.NumberVertices();
-    Kokkos::View<size_t*, execution_space> matRowPtr("Row Pointer Matrix", numDofs + 1);
+    Kokkos::View<size_t*, host_execution_space> matRowPtr("Row Pointer Matrix", numDofs + 1);
     Kokkos::deep_copy(matRowPtr, meshData.n2n.row_map);
-    Kokkos::View<int*, execution_space> matColIdx("Column Index Matrix", meshData.n2n.entries.size());
+    Kokkos::View<int*, host_execution_space> matColIdx("Column Index Matrix", meshData.n2n.entries.size());
     Kokkos::deep_copy(matColIdx, meshData.n2n.entries);
-    Kokkos::View<double*, execution_space> matValues("Values Matrix", matColIdx.size());
-    Kokkos::View<double*, execution_space> rhsValues("Values RHS", numDofs);
+    Kokkos::View<double*, host_execution_space> matValues("Values Matrix", matColIdx.size());
+    Kokkos::View<double*, host_execution_space> rhsValues("Values RHS", numDofs);
     //
     const IMSI::ParabolicPb problem;
     start = std::chrono::high_resolution_clock::now();
@@ -74,12 +74,12 @@ main(int argc, char* argv[])
     //
     //--- Solve the linear system
     //
-    Kokkos::View<double*, execution_space> u("Value for approximation", myMesh.NumberVertices());
+    Kokkos::View<double*, host_execution_space> u("Value for approximation", myMesh.NumberVertices());
     {
-      Kokkos::View<size_t*, execution_space> newRowPtr("Row Pointer for free degrees", size(freeToGlobal) + 1);
+      Kokkos::View<size_t*, host_execution_space> newRowPtr("Row Pointer for free degrees", size(freeToGlobal) + 1);
       int                                    newNNZ = 0;
       Kokkos::parallel_reduce(
-          Kokkos::RangePolicy<execution_space>(0, size(freeToGlobal)),
+          Kokkos::RangePolicy<host_execution_space>(0, size(freeToGlobal)),
           KOKKOS_LAMBDA(int i, int& count) {
             auto   gDof   = freeToGlobal[i];
             size_t iCount = 0;
@@ -91,16 +91,15 @@ main(int argc, char* argv[])
           },
           Kokkos::Sum<int>(newNNZ));
       //
-      auto h_rowPtr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), newRowPtr);
-      for (int i = 0; i < h_rowPtr.size() - 1; ++i) { h_rowPtr(i + 1) += h_rowPtr(i); }
-      Kokkos::deep_copy(newRowPtr, h_rowPtr);
+      for (int i = 0; i < newRowPtr.size() - 1; ++i) { newRowPtr(i + 1) += newRowPtr(i); }
       //
-      Kokkos::View<int*, execution_space>    newColIdx("Col Idx for free degrees", newNNZ);
-      Kokkos::View<double*, execution_space> newValues("Values for free degrees", newNNZ);
-      Kokkos::View<double*, execution_space> newRHS("RHS for free degrees", size(freeToGlobal));
+      Kokkos::View<int*, host_execution_space>    newColIdx("Col Idx for free degrees", newNNZ);
+      Kokkos::View<double*, host_execution_space> newValues("Values for free degrees", newNNZ);
+      Kokkos::View<double*, host_execution_space> newRHS("RHS for free degrees", size(freeToGlobal));
       //
+        auto const                                        n = size(freeToGlobal);
       Kokkos::parallel_for(
-          "Fill free Matrix", Kokkos::RangePolicy<execution_space>(0, size(freeToGlobal)), KOKKOS_LAMBDA(int iFree) {
+          "Fill free Matrix", Kokkos::RangePolicy<host_execution_space>(0, n), KOKKOS_LAMBDA(int iFree) {
             auto   gdof = freeToGlobal[iFree];
             size_t pos  = newRowPtr[iFree];
             for (auto k = matRowPtr[gdof]; k < matRowPtr[gdof + 1]; ++k) {
@@ -115,7 +114,6 @@ main(int argc, char* argv[])
           });
       //
       Tacho::CrsMatrixBase<double, host_execution_type> h_A;
-      auto const                                        n = size(freeToGlobal);
       h_A.setExternalMatrix(n, n, newNNZ, newRowPtr, newColIdx, newValues);
       //
       Tacho::CrsMatrixBase<double, accelerator_type> A;
@@ -134,11 +132,10 @@ main(int argc, char* argv[])
       // So even if one linear system with a single RHS needs to be solved,
       // the current interface requires to use a "matrix" with 1 column.
       //
-      Kokkos::View<double**, Kokkos::LayoutLeft, typename accelerator_type::execution_space> b("rhs", n, 1);
-      Kokkos::View<double**, Kokkos::LayoutLeft, typename accelerator_type::execution_space> x("solution", n, 1);
-      Kokkos::View<double**, Kokkos::LayoutLeft, typename accelerator_type::execution_space> wt("workspace", n, 1);
+      Kokkos::View<double**, Kokkos::LayoutLeft, accelerator_space> b("rhs", n, 1);
+      Kokkos::View<double**, Kokkos::LayoutLeft, accelerator_space> x("solution", n, 1);
+      Kokkos::View<double**, Kokkos::LayoutLeft, accelerator_space> wt("workspace", n, 1);
       //
-      // Fill the right hand side with random values
       auto b0 = Kokkos::subview(b, Kokkos::ALL, 0);
       Kokkos::deep_copy(b0, newRHS);
       //
@@ -159,7 +156,7 @@ main(int argc, char* argv[])
       //
       auto ufree = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(x, Kokkos::ALL, 0));
       Kokkos::parallel_for(
-          "Fill u", Kokkos::RangePolicy<execution_space>(0, size(freeToGlobal)), KOKKOS_LAMBDA(int i) {
+          "Fill u", Kokkos::RangePolicy<host_execution_space>(0, n), KOKKOS_LAMBDA(int i) {
             auto dof = freeToGlobal[i];
             u[dof]   = ufree[i];
           });

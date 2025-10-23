@@ -415,7 +415,7 @@ ScaledLaplacian::GetLinearSystem_v(
   auto const& c2e  = meshInfo.c2e;
   auto const  sdim = meshInfo.mesh.GetSpatialDimension();
 
-  const int vecSize = Kokkos::Experimental::native_simd<double>::size();
+  constexpr int vecSize = Kokkos::Experimental::native_simd<double>::size();
 
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
     auto const eleList = c2e.rowConst(ic);
@@ -462,8 +462,10 @@ ScaledLaplacian::GetLinearSystem_v(
                         auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
                         for (int i = 0; i < fe2DQ1::numNode; ++i) {
                           auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                          for (int k = 0; k < fe2DQ1::sdim; ++k) {
-                            coords[jE + k * vecSize + i * fe2DQ1::sdim * vecSize] = vertex[k];
+                          {
+                              auto const shift = jE + i * fe2DQ1::sdim * vecSize;
+                            coords[shift] = vertex[0];
+                            coords[shift + vecSize] = vertex[1];
                           }
                         }
                       }
@@ -502,17 +504,19 @@ ScaledLaplacian::GetLinearSystem_v(
                     //
                     std::array<simd_type, fe2DQ2::numNode * fe2DQ2::sdim> coords_v{};
                     {
-                      std::array<double, fe2DQ2::numNode * fe2DQ2::sdim * vecSize> coords{};
+                      std::array<double, coords_v.size() * vecSize> coords{};
                       for (int jE = 0; jE < vecSize; ++jE) {
                         auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
                         for (int i = 0; i < fe2DQ2::numNode; ++i) {
                           auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                          for (int k = 0; k < fe2DQ2::sdim; ++k) {
-                            coords[jE + k * vecSize + i * fe2DQ2::sdim * vecSize] = vertex[k];
+                          {
+                            auto const shift = jE + i * fe2DQ2::sdim * vecSize;
+                            coords[shift] = vertex[0];
+                            coords[shift + vecSize] = vertex[1];
                           }
                         }
                       }
-                      for (int i = 0; i < fe2DQ2::numNode * fe2DQ2::sdim; ++i) {
+                      for (int i = 0; i < coords_v.size(); ++i) {
                         coords_v[i].copy_from(&coords[i * vecSize], Kokkos::Experimental::element_aligned_tag());
                       }
                     }
