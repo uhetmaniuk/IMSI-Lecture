@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <iostream>
 
 namespace IMSI {
 
@@ -12,13 +13,12 @@ namespace IMSI {
             J[0] = Scalar(1) / J[0];
         }
         else if constexpr (N == 2) {
-            auto const J00 = J[0];
-            Jac = J00 * J[3] - J[1] * J[2];
+            auto const initJ0 = J[0];
+            Jac = initJ0 * J[3] - J[1] * J[2];
             auto const invJac = Scalar(1) / Jac;
-            auto const tmp = J[0];
             //
             J[0] = J[3];
-            J[3] = tmp;
+            J[3] = initJ0;
             //
             J[1] = -J[1];
             J[2] = -J[2];

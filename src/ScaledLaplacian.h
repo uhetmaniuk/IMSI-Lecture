@@ -432,10 +432,8 @@ ScaledLaplacian::GetLinearSystem_v(
             // Element type for eleID
             // !!! WARNING !!! This step assumes that the 'vecSize' elements are of the same type.
             //
-            auto const ik       = kptr + jj;
-            if (ik + vecSize > eleList.length) {
-              break;
-            }
+            auto const ik = kptr + jj;
+            if (ik + vecSize > eleList.length) { break; }
             auto const eleID    = eleList(ik);
             int        numNodes = 0;
             switch (meshInfo.mesh.GetCellType(eleID)) {
@@ -463,8 +461,8 @@ ScaledLaplacian::GetLinearSystem_v(
                         for (int i = 0; i < fe2DQ1::numNode; ++i) {
                           auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
                           {
-                              auto const shift = jE + i * fe2DQ1::sdim * vecSize;
-                            coords[shift] = vertex[0];
+                            auto const shift        = jE + i * fe2DQ1::sdim * vecSize;
+                            coords[shift]           = vertex[0];
                             coords[shift + vecSize] = vertex[1];
                           }
                         }
@@ -510,8 +508,8 @@ ScaledLaplacian::GetLinearSystem_v(
                         for (int i = 0; i < fe2DQ2::numNode; ++i) {
                           auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
                           {
-                            auto const shift = jE + i * fe2DQ2::sdim * vecSize;
-                            coords[shift] = vertex[0];
+                            auto const shift        = jE + i * fe2DQ2::sdim * vecSize;
+                            coords[shift]           = vertex[0];
                             coords[shift + vecSize] = vertex[1];
                           }
                         }
@@ -572,10 +570,8 @@ ScaledLaplacian::GetLinearSystem_v(
           std::vector<double> rele(maxNumDofsPerEle);
           std::vector<double> kele(maxNumDofsPerEle * maxNumDofsPerEle);
           for (; jj < klen; jj += 1) {
-            auto const ik       = kptr + jj;
-            if (ik >= eleList.length) {
-              break;
-            }
+            auto const ik = kptr + jj;
+            if (ik >= eleList.length) { break; }
             auto const eleID    = eleList(ik);
             auto       nodeList = meshInfo.mesh.NodeList(eleID);
             //

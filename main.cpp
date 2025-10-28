@@ -12,10 +12,10 @@
 #include "src/Utils.h"
 
 using accelerator_space = Kokkos::DefaultExecutionSpace;
-using accelerator_type = typename Kokkos::Device<accelerator_space, accelerator_space::memory_space>;
+using accelerator_type  = typename Kokkos::Device<accelerator_space, accelerator_space::memory_space>;
 
-using host_execution_space     = Kokkos::DefaultHostExecutionSpace;
-using host_execution_type = typename Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::HostSpace>;
+using host_execution_space = Kokkos::DefaultHostExecutionSpace;
+using host_execution_type  = typename Kokkos::Device<Kokkos::DefaultHostExecutionSpace, Kokkos::HostSpace>;
 
 int
 main(int argc, char* argv[])
@@ -31,8 +31,8 @@ main(int argc, char* argv[])
     IMSI::DomainParams dParams;
     dParams.numElePerDir[0] = 384;
     dParams.numElePerDir[1] = 384;
-    dParams.omega = IMSI::DomainType::Rectangle;
-    dParams.cellType = IMSI::ElementType::Q2;
+    dParams.omega           = IMSI::DomainType::Rectangle;
+    dParams.cellType        = IMSI::ElementType::Q2;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
     //
@@ -49,7 +49,7 @@ main(int argc, char* argv[])
     dt            = end - start;
     std::cout << " --- Get Mesh Connectivities = " << dt.count() << "\n";
     //
-    auto const                             numDofs = meshData.mesh.NumberVertices();
+    auto const                                  numDofs = meshData.mesh.NumberVertices();
     Kokkos::View<size_t*, host_execution_space> matRowPtr("Row Pointer Matrix", numDofs + 1);
     Kokkos::deep_copy(matRowPtr, meshData.n2n.row_map);
     Kokkos::View<int*, host_execution_space> matColIdx("Column Index Matrix", meshData.n2n.entries.size());
@@ -77,7 +77,7 @@ main(int argc, char* argv[])
     Kokkos::View<double*, host_execution_space> u("Value for approximation", myMesh.NumberVertices());
     {
       Kokkos::View<size_t*, host_execution_space> newRowPtr("Row Pointer for free degrees", size(freeToGlobal) + 1);
-      int                                    newNNZ = 0;
+      int                                         newNNZ = 0;
       Kokkos::parallel_reduce(
           Kokkos::RangePolicy<host_execution_space>(0, size(freeToGlobal)),
           KOKKOS_LAMBDA(int i, int& count) {
@@ -97,7 +97,7 @@ main(int argc, char* argv[])
       Kokkos::View<double*, host_execution_space> newValues("Values for free degrees", newNNZ);
       Kokkos::View<double*, host_execution_space> newRHS("RHS for free degrees", size(freeToGlobal));
       //
-        auto const                                        n = size(freeToGlobal);
+      auto const n = size(freeToGlobal);
       Kokkos::parallel_for(
           "Fill free Matrix", Kokkos::RangePolicy<host_execution_space>(0, n), KOKKOS_LAMBDA(int iFree) {
             auto   gdof = freeToGlobal[iFree];
