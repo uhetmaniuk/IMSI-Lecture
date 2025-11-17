@@ -222,13 +222,9 @@ class ScaledLaplacian
 
   template <typename Scalar, typename ElementClass>
   void
-  ElementaryDataLagrangeFE_t(
-      ElementClass&                           element,
-      const Scalar* coords_v,
-      Scalar*                                 rele,
-      Scalar*                                 kele) const
+  ElementaryDataLagrangeFE_t(ElementClass& element, const Scalar* coords_v, Scalar* rele, Scalar* kele) const
   {
-    auto constexpr dim = ElementClass::sdim;
+    auto constexpr dim    = ElementClass::sdim;
     auto constexpr nNodes = ElementClass::numNode;
     //
     std::array<Scalar, dim*(dim + 1)> pointJac;
@@ -240,9 +236,7 @@ class ScaledLaplacian
       for (int jd = 0; jd <= dim; ++jd) {
         for (int id = 0; id < dim; ++id) {
           Scalar jacEntry{0};
-          for (int kn = 0; kn < nNodes; ++kn) {
-            jacEntry += NandGradN[kn + jd * nNodes] * coords_v[id + kn * dim];
-          }
+          for (int kn = 0; kn < nNodes; ++kn) { jacEntry += NandGradN[kn + jd * nNodes] * coords_v[id + kn * dim]; }
           pointJac[id + jd * dim] = jacEntry;
         }
       }
@@ -345,17 +339,13 @@ ScaledLaplacian::GetLinearSystem(
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
     auto const eleList = c2e.rowConst(ic);
     Kokkos::parallel_for(
-        Kokkos::TeamPolicy<Device>(Kokkos::num_threads(), 1),
+        Kokkos::TeamPolicy<Device>(eleList.length, 1),
         KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
-          auto const          ratio = (eleList.length + team.league_size() - 1) / team.league_size();
-          auto const          kptr  = team.team_rank() + ratio * team.league_rank();
+          auto const          ik = team.league_size();
           std::vector<double> rele(maxNumDofsPerEle);
           std::vector<double> kele(maxNumDofsPerEle * maxNumDofsPerEle);
-          for (int jj = 0; jj < ratio; ++jj) {
-            auto const ik = kptr + jj;
-            if (ik < eleList.length) {
-              auto const                                         eleID    = eleList(ik);
-              auto                                               nodeList = meshInfo.mesh.NodeList(eleID);
+              auto const eleID    = eleList(ik);
+              auto       nodeList = meshInfo.mesh.NodeList(eleID);
               //
               rele.assign(size(nodeList), 0);
               kele.assign(size(nodeList) * size(nodeList), 0);
@@ -372,9 +362,8 @@ ScaledLaplacian::GetLinearSystem(
                         auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
-                              fe1DQ1 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe1DQ1>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      fe1DQ1 element;
+                      this->ElementaryDataLagrangeFE_t<double, fe1DQ1>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                     default:
@@ -385,8 +374,7 @@ ScaledLaplacian::GetLinearSystem(
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
                       fe2DQ1 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe2DQ1>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      this->ElementaryDataLagrangeFE_t<double, fe2DQ1>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                     case 3: {
@@ -396,8 +384,7 @@ ScaledLaplacian::GetLinearSystem(
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
                       fe3DQ1 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe3DQ1>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      this->ElementaryDataLagrangeFE_t<double, fe3DQ1>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                   }
@@ -412,8 +399,7 @@ ScaledLaplacian::GetLinearSystem(
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
                       fe1DQ2 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe1DQ2>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      this->ElementaryDataLagrangeFE_t<double, fe1DQ2>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                     default:
@@ -424,8 +410,7 @@ ScaledLaplacian::GetLinearSystem(
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
                       fe2DQ2 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe2DQ2>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      this->ElementaryDataLagrangeFE_t<double, fe2DQ2>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                     case 3: {
@@ -435,8 +420,7 @@ ScaledLaplacian::GetLinearSystem(
                         std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
                       }
                       fe3DQ2 element;
-                      this->ElementaryDataLagrangeFE_t<double, fe3DQ2>(
-                          element, &coords[0], &rele[0], &kele[0]);
+                      this->ElementaryDataLagrangeFE_t<double, fe3DQ2>(element, &coords[0], &rele[0], &kele[0]);
                       break;
                     }
                   }
@@ -454,8 +438,6 @@ ScaledLaplacian::GetLinearSystem(
                   matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
                 }
               }
-            }
-          }
         });
     Kokkos::fence();
   }
@@ -477,7 +459,7 @@ ScaledLaplacian::GetLinearSystem_v(
       Kokkos::Max<size_t>(maxNumDofsPerEle));
 
   auto const& c2e  = meshInfo.c2e;
-  auto const sdim = meshInfo.mesh.GetSpatialDimension();
+  auto const  sdim = meshInfo.mesh.GetSpatialDimension();
 
   constexpr int vecSize = Kokkos::Experimental::native_simd<double>::size();
 
@@ -491,6 +473,8 @@ ScaledLaplacian::GetLinearSystem_v(
           std::vector<simd_type> rele_v(maxNumDofsPerEle);
           std::vector<simd_type> kele_v(maxNumDofsPerEle * maxNumDofsPerEle);
           int                    jj = 0;
+          /// !!! maxNumDofsPerEle is not what I need for the coords
+          std::vector<double>    coords(sdim * vecSize * maxNumDofsPerEle);
           for (; jj + vecSize <= klen; jj += vecSize) {
             //
             // Element type for eleID
@@ -519,7 +503,6 @@ ScaledLaplacian::GetLinearSystem_v(
                     //
                     std::array<simd_type, fe2DQ1::numNode * fe2DQ1::sdim> coords_v{};
                     {
-                      std::array<double, fe2DQ1::numNode * fe2DQ1::sdim * vecSize> coords{};
                       for (int jE = 0; jE < vecSize; ++jE) {
                         auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
                         for (int i = 0; i < fe2DQ1::numNode; ++i) {
@@ -537,8 +520,7 @@ ScaledLaplacian::GetLinearSystem_v(
                     }
                     //
                     fe2DQ1 element;
-                    this->ElementaryDataLagrangeFE_t<simd_type, fe2DQ1>(
-                        element, &coords_v[0], &rele_v[0], &kele_v[0]);
+                    this->ElementaryDataLagrangeFE_t<simd_type, fe2DQ1>(element, &coords_v[0], &rele_v[0], &kele_v[0]);
                     break;
                   }
                   case 3: {
@@ -566,7 +548,6 @@ ScaledLaplacian::GetLinearSystem_v(
                     //
                     std::array<simd_type, fe2DQ2::numNode * fe2DQ2::sdim> coords_v{};
                     {
-                      std::array<double, coords_v.size() * vecSize> coords{};
                       for (int jE = 0; jE < vecSize; ++jE) {
                         auto const nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
                         for (int i = 0; i < fe2DQ2::numNode; ++i) {
@@ -584,18 +565,33 @@ ScaledLaplacian::GetLinearSystem_v(
                     }
                     //
                     fe2DQ2 element;
-                    this->ElementaryDataLagrangeFE_t<simd_type, fe2DQ2>(
-                        element, &coords_v[0], &rele_v[0], &kele_v[0]);
+                    this->ElementaryDataLagrangeFE_t<simd_type, fe2DQ2>(element, &coords_v[0], &rele_v[0], &kele_v[0]);
                     break;
                   }
                   case 3: {
                     // fe3DQ2 element;
-                    // this->ElementaryDataLagrangeFE<3, 27, fe3DQ2>(element, nodeList, &rele[0],
-                    //                                               &kele[0]);
-                    // break;
+                    //// TO BE IMPLEMENTED
+                    break;
                   }
                 }
-              }
+              } // case ElementType::Q2:
+              case ElementType::MFEM_L: {
+               switch (sdim) {
+                 default: {
+                   std::cerr << " Combination not implemented yet !!! \n\n";
+                   exit(EXIT_FAILURE);
+                   break;
+                 }
+                 case 2: {
+                   /// Get the number of fine elements inside (assume same number everywhere)
+                   /// Copy the coordinates of the "vecSize" elements
+                   /// Note that the elements will be disconnected
+                   ///
+                   break;
+                 }
+               }
+                 break;
+              } // case ElementType::MFEM_L:
             }
             //
             {
