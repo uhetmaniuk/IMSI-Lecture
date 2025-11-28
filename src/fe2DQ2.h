@@ -32,14 +32,14 @@ namespace IMSI {
       /// \param[in] xi 1st coordinate of quadrature point in [-1, 1]
       /// \param[in] eta 2nd coordinate of quadrature point in [-1, 1]
       /// \param[in] zeta 3rd coordinate of quadrature point in [-1, 1] (unused)
-      template<typename Scalar = double>
+      template<typename Scalar>
       static auto GetValuesGradients(Scalar xi, Scalar eta, [[maybe_unused]] Scalar zeta)  {
           std::array<Scalar, numNode * (sdim + 1)> values_gradients;
           int count = 0;
           //--------
-          Scalar half(Scalar(0.5));
-          Scalar one(Scalar(1.0));
-          Scalar two(Scalar(2.0));
+          Scalar half(0.5);
+          Scalar one(1.0);
+          Scalar two(2.0);
           //--------
           Scalar leftXi = half * (xi - one)*xi;
           Scalar middleXi = one - xi*xi;

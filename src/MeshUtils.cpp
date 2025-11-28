@@ -235,7 +235,7 @@ namespace IMSI {
         return Mesh{dim, vList, std::move(cType), std::move(cList), std::move(boundaryNode)};
     }
 
-    Mesh GenerateMesh(DomainParams const &params, std::vector<double> corners) {
+    Mesh GenerateMesh(DomainParams const &params) {
 
         switch (params.omega) {
             case DomainType::InputFile: {
