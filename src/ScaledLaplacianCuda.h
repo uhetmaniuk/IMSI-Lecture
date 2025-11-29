@@ -471,6 +471,14 @@ ScaledLaplacianCuda::GetLinearSystem(
               }
             }
 
+            // Evaluate material coefficients at quadrature point (device-side)
+            // TODO: Make this more general - currently hardcoded for specific functions
+            double alpha_x_q = 1.0;  // Constant for now
+            double alpha_y_q = 1.0;  // Constant for now
+            // For varying coefficients, evaluate at (xq, yq):
+            // double alpha_x_q = ... function of xq, yq ...
+            // double alpha_y_q = ... function of xq, yq ...
+
             // Assemble stiffness
             double w_v = quadWeight_local(iq);
             double coeff = w_v * detJ;
@@ -478,8 +486,8 @@ ScaledLaplacianCuda::GetLinearSystem(
             for (int jn = 0; jn < nNodes; ++jn) {
               for (int in = 0; in <= jn; ++in) {
                 double sum = 0.0;
-                sum += GradPhi[0 + in * dim] * alpha_x_val * GradPhi[0 + jn * dim];
-                sum += GradPhi[1 + in * dim] * alpha_y_val * GradPhi[1 + jn * dim];
+                sum += GradPhi[0 + in * dim] * alpha_x_q * GradPhi[0 + jn * dim];
+                sum += GradPhi[1 + in * dim] * alpha_y_q * GradPhi[1 + jn * dim];
                 kele[in + jn * nNodes] += sum * coeff;
               }
             }
@@ -494,7 +502,8 @@ ScaledLaplacianCuda::GetLinearSystem(
             // Assemble RHS
             if (has_f) {
               // Evaluate forcing function at quadrature point (device-side)
-              // Note: xq, yq are physical coordinates from Jacobian
+              // TODO: Make this more general - currently hardcoded for specific function
+              // Current function: f(x,y) = 2*pi^2*sin(pi*x)*sin(pi*y)
               constexpr double pi = 3.14159265358979323846;
               double fq = 2.0 * pi * pi * sin(pi * xq) * sin(pi * yq);
 
