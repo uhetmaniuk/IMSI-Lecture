@@ -61,10 +61,10 @@ int main(int argc, char* argv[])
     // ========================================================================
 
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 64; // 2048
-    dParams.numElePerDir[1] = 64; // 2048
+    dParams.numElePerDir[0] = 8; // 2048
+    dParams.numElePerDir[1] = 8; // 2048
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::MFEM_L;
+    dParams.cellType        = IMSI::ElementType::Q1; // MFEM_L
 
     std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
               << " Q1 elements" << std::endl;

@@ -292,6 +292,8 @@ ScaledLaplacianCuda::GetLinearSystem(
   bool has_ay = ay.has_value();
   bool has_f = f.has_value();
 
+  printf("DEBUG: has_ax = %d, has_ay = %d, has_f = %d\n", has_ax, has_ay, has_f);
+
   // For simplicity, assume constant coefficients for now
   double alpha_x_val = 1.0;
   double alpha_y_val = 1.0;
@@ -300,6 +302,8 @@ ScaledLaplacianCuda::GetLinearSystem(
   if (has_ax) { alpha_x_val = ax.value()(0.5, 0.5, 0.0); }
   if (has_ay) { alpha_y_val = ay.value()(0.5, 0.5, 0.0); }
   if (has_f) { f_val = f.value()(0.5, 0.5, 0.0); }
+
+  printf("DEBUG: alpha_x_val = %f, alpha_y_val = %f, f_val = %f\n", alpha_x_val, alpha_y_val, f_val);
 
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
@@ -318,6 +322,12 @@ ScaledLaplacianCuda::GetLinearSystem(
           auto const eleID = eleList(ik);
           auto const nodeList = meshInfo.mesh.NodeList(eleID);
           auto const cellType = meshInfo.mesh.GetCellType(eleID);
+
+          // Debug: Print first element info
+          if (ik == 0) {
+            printf("  First element in color: eleID=%d, cellType=%d (Q1=%d), numNodes=%d\n",
+                   eleID, (int)cellType, (int)ElementType::Q1, (int)size(nodeList));
+          }
 
           // Only handle Q1 elements for now
           if (cellType != ElementType::Q1) {
@@ -411,6 +421,12 @@ ScaledLaplacianCuda::GetLinearSystem(
             }
           }
           // === End inline Q1 assembly ===
+
+          // Debug: Print RHS values for first element
+          if (ik == 0) {
+            printf("  First element RHS: has_f=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
+                   has_f, f_val, rele[0], rele[1], rele[2], rele[3]);
+          }
 
           // Scatter to global arrays (no atomics needed due to coloring)
           for (int in = 0; in < size(nodeList); ++in) {
