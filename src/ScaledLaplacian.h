@@ -911,7 +911,7 @@ ScaledLaplacian::GetLinearSystem_v(
           }
           //
           for (int in = 0; in < size(nodeList); ++in) {
-            if constexpr (useColoring) {
+            if (useColoring) {
               rhs(nodeList[in]) += rele[in];
             } else {
               Kokkos::atomic_add(&rhs(nodeList[in]), rele[in]);
@@ -924,7 +924,7 @@ ScaledLaplacian::GetLinearSystem_v(
             auto const colEnd   = &matColIdx(matRowPtr(irow + 1));
             for (int jn = 0; jn < size(nodeList); ++jn) {
               auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
-              if constexpr (useColoring) {
+              if (useColoring) {
                 matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
               } else {
                 Kokkos::atomic_add(&matValues(matRowPtr(irow) + pos), kele[in + jn * size(nodeList)]);
@@ -1068,7 +1068,7 @@ ScaledLaplacian::GetLinearSystem_v(
             for (int jE = 0; jE < vecSize; ++jE) {
               auto const& nodeList = meshInfo.mesh.NodeList(eleList(ik + jE));
               for (int in = 0; in < size(nodeList); ++in) {
-                if constexpr (useColoring) {
+                if (useColoring) {
                   rhs(nodeList[in]) += rele_unpacked[jE + in * vecSize];
                 } else {
                   Kokkos::atomic_add(&rhs(nodeList[in]), rele_unpacked[jE + in * vecSize]);
@@ -1090,7 +1090,7 @@ ScaledLaplacian::GetLinearSystem_v(
                 auto const colEnd   = &matColIdx(matRowPtr(irow + 1));
                 for (int jn = 0; jn < size(nodeList); ++jn) {
                   auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
-                  if constexpr (useColoring) {
+                  if (useColoring) {
                     matValues(matRowPtr(irow) + pos) += kele_unpacked[jE + in * vecSize + jn * numNodes * vecSize];
                   } else {
                     Kokkos::atomic_add(
