@@ -156,11 +156,12 @@ int main(int argc, char* argv[])
 
     std::cout << "Applying boundary conditions..." << std::endl;
 
-    auto const&      bdyNodes = myMesh.GetBoundaryNodes();
-    std::vector<int> globalToFree(myMesh.NumberVertices());
-    std::vector<int> freeToGlobal(size(globalToFree) - size(bdyNodes));
+    auto const&      bdyNodes = mesh.GetBoundaryNodes();
+    std::vector<int> globalToFree(mesh.NumberVertices());
+    std::vector<int> freeToGlobal(globalToFree.size() - bdyNodes.size());
     IMSI::MapDegreesOfFreedom(bdyNodes, globalToFree, freeToGlobal);
 
+    auto numFreeDofs = freeToGlobal.size();
     std::cout << "  Total DOFs:    " << numNodes << std::endl;
     std::cout << "  Boundary DOFs: " << numNodes - numFreeDofs << std::endl;
     std::cout << "  Free DOFs:     " << numFreeDofs << std::endl;
