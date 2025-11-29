@@ -32,7 +32,7 @@ int lower_bound_device(const T* array, int size, T value) {
   return left;
 }
 
-/// \brief CUDA-optimized ScaledLaplacian class for 2D problems
+/// \brief CUDA ScaledLaplacian class for 2D problems
 ///
 /// This class provides CUDA-accelerated assembly for the scaled Laplacian operator:
 ///   -∇·(α∇u) = f
@@ -395,8 +395,6 @@ ScaledLaplacianCuda::GetLinearSystem(
 
             // Compute Jacobian
             double pointJac[dim * (dim + 1)];
-            for (int i = 0; i < dim * (dim + 1); ++i) { pointJac[i] = 0.0; }
-
             for (int jd = 0; jd <= dim; ++jd) {
               for (int id = 0; id < dim; ++id) {
                 double jacEntry = 0.0;
@@ -418,8 +416,6 @@ ScaledLaplacianCuda::GetLinearSystem(
 
             // Transform gradients
             double GradPhi[nNodes * dim];
-            for (int i = 0; i < nNodes * dim; ++i) { GradPhi[i] = 0.0; }
-
             double* __restrict GradN = &NandGradN[nNodes];
             for (int jn = 0; jn < nNodes; ++jn) {
               for (int in = 0; in < dim; ++in) {
@@ -444,17 +440,19 @@ ScaledLaplacianCuda::GetLinearSystem(
             double coeff = w_v * detJ;
 
             for (int jn = 0; jn < nNodes; ++jn) {
-              for (int in = 0; in <= jn; ++in) {
+              auto const a_dphi_xj = GradPhi[0 + jn * dim] * alpha_x_q;
+              auto const a_dphi_yj = GradPhi[1 + jn * dim] * alpha_y_q;
+              for (int in = jn; in <= nNodes; ++in) {
                 double sum = 0.0;
-                sum += GradPhi[0 + in * dim] * alpha_x_q * GradPhi[0 + jn * dim];
-                sum += GradPhi[1 + in * dim] * alpha_y_q * GradPhi[1 + jn * dim];
+                sum += GradPhi[0 + in * dim] * a_dphi_xj;
+                sum += GradPhi[1 + in * dim] * a_dphi_yj;
                 kele[in + jn * nNodes] += sum * coeff;
               }
             }
 
             // Symmetrize
             for (int jn = 0; jn < nNodes; ++jn) {
-              for (int in = jn + 1; in < nNodes; ++in) {
+              for (int in = 0; in < jn; ++in) {
                 kele[in + jn * nNodes] = kele[jn + in * nNodes];
               }
             }
