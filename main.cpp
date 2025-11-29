@@ -3,8 +3,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef IMSI_USE_TACHO
 #include "TPL/tacho/src/Tacho_CrsMatrixBase.hpp"
 #include "TPL/tacho/src/Tacho_Driver.hpp"
+#endif
+
 #include "main_config.h"
 #include "src/FunctionExamples.h"
 #include "src/Mesh.h"

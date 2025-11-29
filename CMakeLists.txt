@@ -22,10 +22,16 @@ IF (USE_MKL)
    SET(TPL_ENABLE_MKL ON)
 ENDIF (USE_MKL)
 
+option(USE_TACHO "Use Tacho sparse solver library" OFF)
+if (USE_TACHO)
+    SET(IMSI_USE_TACHO ON)
+endif (USE_TACHO)
+
 find_package(BLAS)
 if (BLAS_FOUND)
     set (EXTRALIB ${EXTRALIB} ${BLAS_LIBRARIES})
-    SET(TPL_ENABLE_BLAS ON)
+    # Note: We use BLAS for Fortran sparse solver, but NOT for KokkosKernels
+    # Do NOT set TPL_ENABLE_BLAS here as it would force KokkosKernels to enable BLAS
     if (USE_MKL)
         SET (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DWITH_MKL")
     else()
@@ -43,14 +49,22 @@ endif(BLAS_FOUND)
 find_package(LAPACK)
 IF (LAPACK_FOUND)
     SET (EXTRALIB ${EXTRALIB} ${LAPACK_LIBRARIES})
-    SET(TPL_ENABLE_LAPACK ON)
+    # Note: We use LAPACK for Fortran sparse solver, but NOT for KokkosKernels
+    # Do NOT set TPL_ENABLE_LAPACK here as it would force KokkosKernels to enable LAPACK
 ENDIF (LAPACK_FOUND)
 
 find_package(METIS)
 IF (METIS_FOUND)
     SET (EXTRALIB ${EXTRALIB} ${METIS_LIBRARIES})
+    # METIS is used by KokkosKernels for graph partitioning, so we set the TPL flag
     SET(TPL_ENABLE_METIS ON)
 ENDIF (METIS_FOUND)
+
+#--- KokkosKernels configuration
+# Note: We use KokkosGraph (coloring) and KokkosSparse (transpose), but cannot disable
+# BLAS/LAPACK/BATCHED components due to internal KokkosKernels dependencies.
+# SPARSE requires BLAS headers even for basic graph operations.
+message(STATUS "KokkosKernels: All components enabled (SPARSE/GRAPH require BLAS/LAPACK dependencies)")
 
 add_subdirectory(TPL)
 add_subdirectory(src)
@@ -60,12 +74,24 @@ add_subdirectory(examples)
 
 add_executable(main.exe  main.cpp)
 
-target_include_directories(main.exe
-        PUBLIC
-        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
-)
+if(USE_TACHO)
+  target_include_directories(main.exe
+          PUBLIC
+          imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+  )
 
-target_link_libraries(main.exe
-        PUBLIC
-        imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
-)
+  target_link_libraries(main.exe
+          PUBLIC
+          imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+  )
+else()
+  target_include_directories(main.exe
+          PUBLIC
+          imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
+  )
+
+  target_link_libraries(main.exe
+          PUBLIC
+          imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+  )
+endif()

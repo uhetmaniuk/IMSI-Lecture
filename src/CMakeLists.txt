@@ -40,11 +40,22 @@ target_sources(imsi_lib
         dgers.f		genmmd.f	ordmmd.f	zblkslv4.f
 )
 
-target_include_directories(imsi_lib
-        PUBLIC
-        ${CMAKE_CURRENT_BINARY_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        tacho Kokkos::kokkoskernels Kokkos::kokkos
-)
+if(USE_TACHO)
+  target_include_directories(imsi_lib
+          PUBLIC
+          ${CMAKE_CURRENT_BINARY_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}
+          tacho Kokkos::kokkoskernels Kokkos::kokkos
+  )
 
-target_link_libraries(imsi_lib PUBLIC tacho Kokkos::kokkoskernels Kokkos::kokkos)
+  target_link_libraries(imsi_lib PUBLIC tacho Kokkos::kokkoskernels Kokkos::kokkos)
+else()
+  target_include_directories(imsi_lib
+          PUBLIC
+          ${CMAKE_CURRENT_BINARY_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}
+          Kokkos::kokkoskernels Kokkos::kokkos
+  )
+
+  target_link_libraries(imsi_lib PUBLIC Kokkos::kokkoskernels Kokkos::kokkos)
+endif()

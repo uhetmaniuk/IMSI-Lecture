@@ -1,17 +1,24 @@
-add_executable(
-  Laplace1D.exe
-  Laplace1D.cpp
-)
+# Laplace1D example requires Tacho
+if(USE_TACHO)
+  add_executable(
+    Laplace1D.exe
+    Laplace1D.cpp
+  )
 
-target_include_directories(Laplace1D.exe
-               PUBLIC
-               tacho Kokkos::kokkoskernels Kokkos::kokkos
-               )
+  target_include_directories(Laplace1D.exe
+                 PUBLIC
+                 tacho Kokkos::kokkoskernels Kokkos::kokkos
+                 )
 
-target_link_libraries(Laplace1D.exe
-  PUBLIC
-  tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
-)
+  target_link_libraries(Laplace1D.exe
+    PUBLIC
+    tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+  )
+
+  message(STATUS "Laplace1D example enabled (requires Tacho)")
+else()
+  message(STATUS "Laplace1D example disabled (requires USE_TACHO=ON)")
+endif()
 
 #
 # Example for testing SIMD acceleration
@@ -58,15 +65,27 @@ if(Kokkos_ENABLE_CUDA)
           cuda_assembly.cpp
   )
 
-  target_include_directories(cuda_assembly.exe
-          PUBLIC
-          imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
-  )
+  if(USE_TACHO)
+    target_include_directories(cuda_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+    )
 
-  target_link_libraries(cuda_assembly.exe
-          PUBLIC
-          imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
-  )
+    target_link_libraries(cuda_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  else()
+    target_include_directories(cuda_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
+    )
+
+    target_link_libraries(cuda_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  endif()
 
   message(STATUS "CUDA assembly example enabled")
 else()
