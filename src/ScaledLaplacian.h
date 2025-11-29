@@ -681,6 +681,16 @@ ScaledLaplacian::GetLinearSystem(
                   }
                   fe2DQ1 element;
                   this->ElementaryDataLagrangeFE_t<double, fe2DQ1>(element, &coords[0], &rele[0], &kele[0]);
+
+                  // Debug: Print first element RHS (CPU version)
+                  if (eleID == 0 && ic == 0) {
+                    double f_val = (f.has_value()) ? f.value()(0.5, 0.5, 0.0) : 0.0;
+                    printf("CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
+                           eleID, f_val, rele[0], rele[1], rele[2], rele[3]);
+                    printf("CPU nodeList=[%d,%d,%d,%d]\n",
+                           (int)nodeList[0], (int)nodeList[1], (int)nodeList[2], (int)nodeList[3]);
+                  }
+
                   break;
                 }
                 case 3: {
@@ -836,6 +846,16 @@ ScaledLaplacian::GetLinearSystem_v(
                   }
                   fe2DQ1 element;
                   this->ElementaryDataLagrangeFE_t<double, fe2DQ1>(element, &coords[0], &rele[0], &kele[0]);
+
+                  // Debug: Print first element RHS (CPU version)
+                  if (eleID == 0 && ic == 0) {
+                    double f_val = (f.has_value()) ? f.value()(0.5, 0.5, 0.0) : 0.0;
+                    printf("CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
+                           eleID, f_val, rele[0], rele[1], rele[2], rele[3]);
+                    printf("CPU nodeList=[%d,%d,%d,%d]\n",
+                           (int)nodeList[0], (int)nodeList[1], (int)nodeList[2], (int)nodeList[3]);
+                  }
+
                   break;
                 }
                 case 3: {

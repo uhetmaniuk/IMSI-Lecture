@@ -69,10 +69,10 @@ main(int argc, char* argv[])
     //
     ///
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 64; // 2048
-    dParams.numElePerDir[1] = 64; // 2048
+    dParams.numElePerDir[0] = 8; // 2048
+    dParams.numElePerDir[1] = 8; // 2048
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::MFEM_L;
+    dParams.cellType        = IMSI::ElementType::Q1;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
     if (dParams.cellType == IMSI::ElementType::MFEM_L) { std::cout << " MFEM_L (-Q1) discretization \n"; }
@@ -100,7 +100,7 @@ main(int argc, char* argv[])
     Kokkos::View<double*, host_execution_space> matValues("Values Matrix", matColIdx.size());
     Kokkos::View<double*, host_execution_space> rhsValues("Values RHS", numDofs);
     //
-    const IMSI::ParabolicPb problem;
+    const IMSI::ParabolicPb2 problem;
     start = std::chrono::high_resolution_clock::now();
     IMSI::ScaledLaplacian dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
     if (useColoring) {

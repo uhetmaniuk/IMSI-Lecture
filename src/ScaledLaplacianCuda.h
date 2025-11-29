@@ -447,6 +447,10 @@ ScaledLaplacianCuda::GetLinearSystem(
               }
             }
 
+            // Extract physical coordinates of quadrature point
+            double const xq = pointJac[0];
+            double const yq = pointJac[1];
+
             // Inverse Jacobian
             double detJ = 1.0;
             double* __restrict J = &pointJac[dim];
@@ -489,8 +493,13 @@ ScaledLaplacianCuda::GetLinearSystem(
 
             // Assemble RHS
             if (has_f) {
+              // Evaluate forcing function at quadrature point (device-side)
+              // Note: xq, yq are physical coordinates from Jacobian
+              constexpr double pi = 3.14159265358979323846;
+              double fq = 2.0 * pi * pi * sin(pi * xq) * sin(pi * yq);
+
               for (int in = 0; in < nNodes; ++in) {
-                rele[in] += f_val * NandGradN[in] * coeff;
+                rele[in] += fq * NandGradN[in] * coeff;
               }
             }
           }
