@@ -286,9 +286,16 @@ ScaledLaplacianCuda::GetLinearSystem(
   auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
   auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
 
-  // Fill host data
+  // Fill host data (initialize cellToNode to -1 first)
   for (int ic = 0; ic < numCells; ++ic) {
     cellTypes_h(ic) = static_cast<int>(meshInfo.mesh.GetCellType(ic));
+
+    // Initialize to -1 (invalid)
+    for (int in = 0; in < 4; ++in) {
+      cellToNode_h(ic, in) = -1;
+    }
+
+    // Fill actual node indices
     auto const& nodeList = meshInfo.mesh.NodeList(ic);
     for (int in = 0; in < nodeList.size() && in < 4; ++in) {
       cellToNode_h(ic, in) = nodeList[in];
@@ -358,6 +365,13 @@ ScaledLaplacianCuda::GetLinearSystem(
         Kokkos::RangePolicy<CudaSpace>(0, numEle),
         KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList(ik);
+
+          // Bounds check
+          if (eleID < 0 || eleID >= cellTypes.extent(0)) {
+            if (ik == 0) printf("ERROR: eleID=%d out of bounds [0,%d)\n", eleID, (int)cellTypes.extent(0));
+            return;
+          }
+
           auto const cellType = static_cast<ElementType>(cellTypes(eleID));
 
           // Count how many elements we process
@@ -385,6 +399,13 @@ ScaledLaplacianCuda::GetLinearSystem(
           double coords[nNodes * dim];
           for (int i = 0; i < nNodes; ++i) {
             nodeList[i] = cellToNode(eleID, i);
+
+            // Bounds check for node index
+            if (nodeList[i] < 0 || nodeList[i] * 2 + 1 >= nodeCoords.extent(0)) {
+              if (ik == 0) printf("ERROR: nodeList[%d]=%d out of bounds\n", i, nodeList[i]);
+              return;
+            }
+
             coords[i * dim + 0] = nodeCoords(nodeList[i] * 2 + 0);
             coords[i * dim + 1] = nodeCoords(nodeList[i] * 2 + 1);
           }
