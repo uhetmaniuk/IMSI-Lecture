@@ -305,6 +305,10 @@ ScaledLaplacianCuda::GetLinearSystem(
 
   printf("DEBUG: alpha_x_val = %f, alpha_y_val = %f, f_val = %f\n", alpha_x_val, alpha_y_val, f_val);
 
+  // Counter to verify assembly is happening
+  Kokkos::View<int*, CudaSpace> assemblyCounter("assemblyCounter", 3);
+  Kokkos::deep_copy(assemblyCounter, 0);
+
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
     auto const eleList = c2e.rowConst(ic);
@@ -323,6 +327,9 @@ ScaledLaplacianCuda::GetLinearSystem(
           auto const nodeList = meshInfo.mesh.NodeList(eleID);
           auto const cellType = meshInfo.mesh.GetCellType(eleID);
 
+          // Count how many elements we process
+          Kokkos::atomic_increment(&assemblyCounter(0));
+
           // Debug: Print first element info
           if (ik == 0) {
             printf("  First element in color: eleID=%d, cellType=%d (Q1=%d), numNodes=%d\n",
@@ -333,6 +340,9 @@ ScaledLaplacianCuda::GetLinearSystem(
           if (cellType != ElementType::Q1) {
             return;  // Skip non-Q1 elements
           }
+
+          // Count Q1 elements
+          Kokkos::atomic_increment(&assemblyCounter(1));
 
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
@@ -433,6 +443,7 @@ ScaledLaplacianCuda::GetLinearSystem(
           // Use nNodes instead of size(nodeList) since size() doesn't work reliably on device
           for (int in = 0; in < nNodes; ++in) {
             rhs(nodeList[in]) += rele[in];
+            Kokkos::atomic_increment(&assemblyCounter(2));  // Count RHS scatter operations
           }
 
           for (int in = 0; in < nNodes; ++in) {
@@ -450,10 +461,16 @@ ScaledLaplacianCuda::GetLinearSystem(
         });
 
     Kokkos::fence();
-
-    // Flush CUDA printf buffer
-    cudaDeviceSynchronize();
   }
+
+  // Print assembly statistics
+  auto assemblyCounter_h = Kokkos::create_mirror_view(assemblyCounter);
+  Kokkos::deep_copy(assemblyCounter_h, assemblyCounter);
+  printf("Assembly statistics:\n");
+  printf("  Total elements processed: %d\n", assemblyCounter_h(0));
+  printf("  Q1 elements assembled:    %d\n", assemblyCounter_h(1));
+  printf("  RHS scatter operations:   %d (expected: %d)\n",
+         assemblyCounter_h(2), assemblyCounter_h(1) * 4);
 
   // Handle MFEM_L elements if present (process on host)
   bool hasMFEM = false;
