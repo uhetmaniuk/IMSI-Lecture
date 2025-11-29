@@ -426,28 +426,33 @@ ScaledLaplacianCuda::GetLinearSystem(
           if (ik == 0) {
             printf("  First element RHS: has_f=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
                    has_f, f_val, rele[0], rele[1], rele[2], rele[3]);
+            printf("  size(nodeList)=%d, nNodes=%d\n", (int)size(nodeList), nNodes);
           }
 
           // Scatter to global arrays (no atomics needed due to coloring)
-          for (int in = 0; in < size(nodeList); ++in) {
+          // Use nNodes instead of size(nodeList) since size() doesn't work reliably on device
+          for (int in = 0; in < nNodes; ++in) {
             rhs(nodeList[in]) += rele[in];
           }
 
-          for (int in = 0; in < size(nodeList); ++in) {
+          for (int in = 0; in < nNodes; ++in) {
             auto const irow = nodeList[in];
             auto const colBegin = &matColIdx(matRowPtr(irow));
             auto const colEnd = &matColIdx(matRowPtr(irow + 1));
 
-            for (int jn = 0; jn < size(nodeList); ++jn) {
+            for (int jn = 0; jn < nNodes; ++jn) {
               // Binary search for column position
               int const numCols = colEnd - colBegin;
               auto const pos = lower_bound_device(colBegin, numCols, nodeList[jn]);
-              matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
+              matValues(matRowPtr(irow) + pos) += kele[in + jn * nNodes];
             }
           }
         });
 
     Kokkos::fence();
+
+    // Flush CUDA printf buffer
+    cudaDeviceSynchronize();
   }
 
   // Handle MFEM_L elements if present (process on host)
