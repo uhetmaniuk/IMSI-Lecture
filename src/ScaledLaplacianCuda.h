@@ -318,17 +318,21 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     printf("  Color %d: %d elements\n", ic, numEle);
 
+    // Capture mesh and counters for device lambda
+    auto mesh_d = meshInfo.mesh;
+    auto counter_d = assemblyCounter;
+
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
         "Q1Assembly_Color",
         Kokkos::RangePolicy<CudaSpace>(0, numEle),
         KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList(ik);
-          auto const nodeList = meshInfo.mesh.NodeList(eleID);
-          auto const cellType = meshInfo.mesh.GetCellType(eleID);
+          auto const nodeList = mesh_d.NodeList(eleID);
+          auto const cellType = mesh_d.GetCellType(eleID);
 
           // Count how many elements we process
-          Kokkos::atomic_increment(&assemblyCounter(0));
+          Kokkos::atomic_increment(&counter_d(0));
 
           // Debug: Print first element info
           if (ik == 0) {
@@ -342,7 +346,7 @@ ScaledLaplacianCuda::GetLinearSystem(
           }
 
           // Count Q1 elements
-          Kokkos::atomic_increment(&assemblyCounter(1));
+          Kokkos::atomic_increment(&counter_d(1));
 
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
@@ -350,7 +354,7 @@ ScaledLaplacianCuda::GetLinearSystem(
           // Get element coordinates
           double coords[nNodes * dim];
           for (int i = 0; i < nNodes; ++i) {
-            auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
+            auto const vertex = mesh_d.GetVertex(nodeList[i]);
             coords[i * dim] = vertex[0];
             coords[i * dim + 1] = vertex[1];
           }
@@ -443,7 +447,7 @@ ScaledLaplacianCuda::GetLinearSystem(
           // Use nNodes instead of size(nodeList) since size() doesn't work reliably on device
           for (int in = 0; in < nNodes; ++in) {
             rhs(nodeList[in]) += rele[in];
-            Kokkos::atomic_increment(&assemblyCounter(2));  // Count RHS scatter operations
+            Kokkos::atomic_increment(&counter_d(2));  // Count RHS scatter operations
           }
 
           for (int in = 0; in < nNodes; ++in) {
