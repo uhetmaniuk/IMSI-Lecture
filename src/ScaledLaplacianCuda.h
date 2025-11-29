@@ -14,6 +14,24 @@
 
 namespace IMSI {
 
+/// \brief Device-compatible binary search for sorted array
+/// Returns index of found element or position where it would be inserted
+template<typename T>
+KOKKOS_INLINE_FUNCTION
+int lower_bound_device(const T* array, int size, T value) {
+  int left = 0;
+  int right = size;
+  while (left < right) {
+    int mid = left + (right - left) / 2;
+    if (array[mid] < value) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left;
+}
+
 /// \brief CUDA-optimized ScaledLaplacian class for 2D problems
 ///
 /// This class provides CUDA-accelerated assembly for the scaled Laplacian operator:
@@ -406,7 +424,8 @@ ScaledLaplacianCuda::GetLinearSystem(
 
             for (int jn = 0; jn < size(nodeList); ++jn) {
               // Binary search for column position
-              auto const pos = thrust::lower_bound(thrust::seq, colBegin, colEnd, nodeList[jn]) - colBegin;
+              int const numCols = colEnd - colBegin;
+              auto const pos = lower_bound_device(colBegin, numCols, nodeList[jn]);
               matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
             }
           }
