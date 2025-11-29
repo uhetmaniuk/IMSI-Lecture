@@ -267,18 +267,46 @@ ScaledLaplacianCuda::GetLinearSystem(
     throw std::runtime_error("Only 2D supported in CUDA version");
   }
 
-  // Determine maximum DOFs per element
-  size_t maxNumDofsPerEle = 0;
-  Kokkos::parallel_reduce(
-      "MaxDofsPerEle",
-      Kokkos::RangePolicy<CudaSpace>(0, meshInfo.mesh.NumberCells()),
-      KOKKOS_LAMBDA(const int& i, size_t& nMax) {
-        nMax = Kokkos::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i)));
-      },
-      Kokkos::Max<size_t>(maxNumDofsPerEle));
-
-  printf("CUDA Assembly: maxNumDofsPerEle = %zu\n", maxNumDofsPerEle);
   printf("Number of colors: %d\n", c2e.numRows());
+
+  // ====================================================================
+  // Extract mesh data to device-accessible structures
+  // ====================================================================
+
+  int const numCells = meshInfo.mesh.NumberCells();
+  int const numNodes = meshInfo.mesh.NumberVertices();
+
+  // Create device views for mesh data
+  Kokkos::View<int*, CudaSpace> cellTypes_d("cellTypes", numCells);
+  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * 2);  // x,y interleaved
+  Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+
+  // Create host mirrors
+  auto cellTypes_h = Kokkos::create_mirror_view(cellTypes_d);
+  auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
+  auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
+
+  // Fill host data
+  for (int ic = 0; ic < numCells; ++ic) {
+    cellTypes_h(ic) = static_cast<int>(meshInfo.mesh.GetCellType(ic));
+    auto const& nodeList = meshInfo.mesh.NodeList(ic);
+    for (int in = 0; in < nodeList.size() && in < 4; ++in) {
+      cellToNode_h(ic, in) = nodeList[in];
+    }
+  }
+
+  for (int in = 0; in < numNodes; ++in) {
+    auto const vertex = meshInfo.mesh.GetVertex(in);
+    nodeCoords_h(in * 2 + 0) = vertex[0];
+    nodeCoords_h(in * 2 + 1) = vertex[1];
+  }
+
+  // Copy to device
+  Kokkos::deep_copy(cellTypes_d, cellTypes_h);
+  Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
+  Kokkos::deep_copy(cellToNode_d, cellToNode_h);
+
+  printf("Copied mesh data to device (%d cells, %d nodes)\n", numCells, numNodes);
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -318,9 +346,11 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     printf("  Color %d: %d elements\n", ic, numEle);
 
-    // Capture mesh and counters for device lambda
-    auto mesh_d = meshInfo.mesh;
+    // Capture device views for lambda
     auto counter_d = assemblyCounter;
+    auto cellTypes = cellTypes_d;
+    auto nodeCoords = nodeCoords_d;
+    auto cellToNode = cellToNode_d;
 
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
@@ -328,16 +358,15 @@ ScaledLaplacianCuda::GetLinearSystem(
         Kokkos::RangePolicy<CudaSpace>(0, numEle),
         KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList(ik);
-          auto const nodeList = mesh_d.NodeList(eleID);
-          auto const cellType = mesh_d.GetCellType(eleID);
+          auto const cellType = static_cast<ElementType>(cellTypes(eleID));
 
           // Count how many elements we process
           Kokkos::atomic_increment(&counter_d(0));
 
           // Debug: Print first element info
           if (ik == 0) {
-            printf("  First element in color: eleID=%d, cellType=%d (Q1=%d), numNodes=%d\n",
-                   eleID, (int)cellType, (int)ElementType::Q1, (int)size(nodeList));
+            printf("  First element in color: eleID=%d, cellType=%d (Q1=%d)\n",
+                   eleID, (int)cellType, (int)ElementType::Q1);
           }
 
           // Only handle Q1 elements for now
@@ -351,12 +380,13 @@ ScaledLaplacianCuda::GetLinearSystem(
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
 
-          // Get element coordinates
+          // Get element node indices and coordinates
+          int nodeList[nNodes];
           double coords[nNodes * dim];
           for (int i = 0; i < nNodes; ++i) {
-            auto const vertex = mesh_d.GetVertex(nodeList[i]);
-            coords[i * dim] = vertex[0];
-            coords[i * dim + 1] = vertex[1];
+            nodeList[i] = cellToNode(eleID, i);
+            coords[i * dim + 0] = nodeCoords(nodeList[i] * 2 + 0);
+            coords[i * dim + 1] = nodeCoords(nodeList[i] * 2 + 1);
           }
 
           // Allocate element arrays
@@ -440,7 +470,7 @@ ScaledLaplacianCuda::GetLinearSystem(
           if (ik == 0) {
             printf("  First element RHS: has_f=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
                    has_f, f_val, rele[0], rele[1], rele[2], rele[3]);
-            printf("  size(nodeList)=%d, nNodes=%d\n", (int)size(nodeList), nNodes);
+            printf("  nodeList=[%d,%d,%d,%d]\n", nodeList[0], nodeList[1], nodeList[2], nodeList[3]);
           }
 
           // Scatter to global arrays (no atomics needed due to coloring)
