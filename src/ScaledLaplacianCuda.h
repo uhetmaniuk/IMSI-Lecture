@@ -313,8 +313,6 @@ ScaledLaplacianCuda::GetLinearSystem(
   Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
   Kokkos::deep_copy(cellToNode_d, cellToNode_h);
 
-  printf("Copied mesh data to device (%d cells, %d nodes)\n", numCells, numNodes);
-
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
   auto quadXi_local = quadXi_d;
@@ -326,23 +324,6 @@ ScaledLaplacianCuda::GetLinearSystem(
   bool has_ax = ax.has_value();
   bool has_ay = ay.has_value();
   bool has_f = f.has_value();
-
-  printf("DEBUG: has_ax = %d, has_ay = %d, has_f = %d\n", has_ax, has_ay, has_f);
-
-  // For simplicity, assume constant coefficients for now
-  double alpha_x_val = 1.0;
-  double alpha_y_val = 1.0;
-  double f_val = 1.0;
-
-  if (has_ax) { alpha_x_val = ax.value()(0.5, 0.5, 0.0); }
-  if (has_ay) { alpha_y_val = ay.value()(0.5, 0.5, 0.0); }
-  if (has_f) { f_val = f.value()(0.5, 0.5, 0.0); }
-
-  printf("DEBUG: alpha_x_val = %f, alpha_y_val = %f, f_val = %f\n", alpha_x_val, alpha_y_val, f_val);
-
-  // Counter to verify assembly is happening
-  Kokkos::View<int*, CudaSpace> assemblyCounter("assemblyCounter", 3);
-  Kokkos::deep_copy(assemblyCounter, 0);
 
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
@@ -362,7 +343,6 @@ ScaledLaplacianCuda::GetLinearSystem(
     Kokkos::deep_copy(eleList_d, eleList_h);
 
     // Capture device views for lambda
-    auto counter_d = assemblyCounter;
     auto cellTypes = cellTypes_d;
     auto nodeCoords = nodeCoords_d;
     auto cellToNode = cellToNode_d;
@@ -377,28 +357,15 @@ ScaledLaplacianCuda::GetLinearSystem(
 
           // Bounds check
           if (eleID < 0 || eleID >= cellTypes.extent(0)) {
-            if (ik == 0) printf("ERROR: eleID=%d out of bounds [0,%d)\n", eleID, (int)cellTypes.extent(0));
             return;
           }
 
           auto const cellType = static_cast<ElementType>(cellTypes(eleID));
 
-          // Count how many elements we process
-          Kokkos::atomic_increment(&counter_d(0));
-
-          // Debug: Print first element info
-          if (ik == 0) {
-            printf("  First element in color: eleID=%d, cellType=%d (Q1=%d)\n",
-                   eleID, (int)cellType, (int)ElementType::Q1);
-          }
-
           // Only handle Q1 elements for now
           if (cellType != ElementType::Q1) {
             return;  // Skip non-Q1 elements
           }
-
-          // Count Q1 elements
-          Kokkos::atomic_increment(&counter_d(1));
 
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
@@ -408,13 +375,6 @@ ScaledLaplacianCuda::GetLinearSystem(
           double coords[nNodes * dim];
           for (int i = 0; i < nNodes; ++i) {
             nodeList[i] = cellToNode(eleID, i);
-
-            // Bounds check for node index
-            if (nodeList[i] < 0 || nodeList[i] * 2 + 1 >= nodeCoords.extent(0)) {
-              if (ik == 0) printf("ERROR: nodeList[%d]=%d out of bounds\n", i, nodeList[i]);
-              return;
-            }
-
             coords[i * dim + 0] = nodeCoords(nodeList[i] * 2 + 0);
             coords[i * dim + 1] = nodeCoords(nodeList[i] * 2 + 1);
           }
@@ -514,18 +474,9 @@ ScaledLaplacianCuda::GetLinearSystem(
           }
           // === End inline Q1 assembly ===
 
-          // Debug: Print RHS values for first element
-          if (ik == 0) {
-            printf("  First element RHS: has_f=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
-                   has_f, f_val, rele[0], rele[1], rele[2], rele[3]);
-            printf("  nodeList=[%d,%d,%d,%d]\n", nodeList[0], nodeList[1], nodeList[2], nodeList[3]);
-          }
-
           // Scatter to global arrays (no atomics needed due to coloring)
-          // Use nNodes instead of size(nodeList) since size() doesn't work reliably on device
           for (int in = 0; in < nNodes; ++in) {
             rhs(nodeList[in]) += rele[in];
-            Kokkos::atomic_increment(&counter_d(2));  // Count RHS scatter operations
           }
 
           for (int in = 0; in < nNodes; ++in) {
@@ -544,15 +495,6 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     Kokkos::fence();
   }
-
-  // Print assembly statistics
-  auto assemblyCounter_h = Kokkos::create_mirror_view(assemblyCounter);
-  Kokkos::deep_copy(assemblyCounter_h, assemblyCounter);
-  printf("Assembly statistics:\n");
-  printf("  Total elements processed: %d\n", assemblyCounter_h(0));
-  printf("  Q1 elements assembled:    %d\n", assemblyCounter_h(1));
-  printf("  RHS scatter operations:   %d (expected: %d)\n",
-         assemblyCounter_h(2), assemblyCounter_h(1) * 4);
 
   // Handle MFEM_L elements if present (process on host)
   bool hasMFEM = false;
