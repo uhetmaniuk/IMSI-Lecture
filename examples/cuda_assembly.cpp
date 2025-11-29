@@ -61,10 +61,10 @@ int main(int argc, char* argv[])
     // ========================================================================
 
     IMSI::DomainParams dParams;
-    dParams.domainType = DomainType::Rectangle;
-    dParams.numElePerDir = {64, 64, 0};  // 64x64 mesh in 2D
-    dParams.domainBounds = {0.0, 1.0, 0.0, 1.0, 0.0, 0.0};
-    dParams.elementType = ElementType::Q1;  // Bilinear quads
+    dParams.numElePerDir[0] = 64; // 2048
+    dParams.numElePerDir[1] = 64; // 2048
+    dParams.omega           = IMSI::DomainType::Rectangle;
+    dParams.cellType        = IMSI::ElementType::MFEM_L;
 
     std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
               << " Q1 elements" << std::endl;
@@ -156,8 +156,10 @@ int main(int argc, char* argv[])
 
     std::cout << "Applying boundary conditions..." << std::endl;
 
-    auto [globalToFree, freeToGlobal] = MapDegreesOfFreedom(mesh);
-    auto const numFreeDofs = freeToGlobal.size();
+    auto const&      bdyNodes = myMesh.GetBoundaryNodes();
+    std::vector<int> globalToFree(myMesh.NumberVertices());
+    std::vector<int> freeToGlobal(size(globalToFree) - size(bdyNodes));
+    IMSI::MapDegreesOfFreedom(bdyNodes, globalToFree, freeToGlobal);
 
     std::cout << "  Total DOFs:    " << numNodes << std::endl;
     std::cout << "  Boundary DOFs: " << numNodes - numFreeDofs << std::endl;
