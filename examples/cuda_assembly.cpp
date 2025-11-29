@@ -60,7 +60,7 @@ int main(int argc, char* argv[])
     // Mesh generation
     // ========================================================================
 
-    DomainParameters dParams;
+    IMSI::DomainParams dParams;
     dParams.domainType = DomainType::Rectangle;
     dParams.numElePerDir = {64, 64, 0};  // 64x64 mesh in 2D
     dParams.domainBounds = {0.0, 1.0, 0.0, 1.0, 0.0, 0.0};
@@ -69,7 +69,7 @@ int main(int argc, char* argv[])
     std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
               << " Q1 elements" << std::endl;
 
-    auto mesh = GenerateMesh(dParams);
+    auto mesh = IMSI::GenerateMesh(dParams);
     std::cout << "  Number of elements: " << mesh.NumberCells() << std::endl;
     std::cout << "  Number of nodes:    " << mesh.NumberVertices() << std::endl;
 
@@ -173,7 +173,6 @@ int main(int argc, char* argv[])
     for (size_t i = 0; i < numFreeDofs; ++i) {
       auto gDof = freeToGlobal[i];
       newRhs[i] = rhs_h(gDof);
-
       for (size_t k = matRowPtr_h(gDof); k < matRowPtr_h(gDof + 1); ++k) {
         auto gCol = matColIdx_h(k);
         if (globalToFree[gCol] != -1) {
@@ -218,7 +217,7 @@ int main(int argc, char* argv[])
       fullSolution[freeToGlobal[i]] = solution[i];
     }
 
-    OutputToGMSH(mesh, "cuda_solution.msh", fullSolution);
+    OutputToGMSH("cuda_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
     std::cout << "  Solution written to: cuda_solution.msh" << std::endl;
 
     // ========================================================================

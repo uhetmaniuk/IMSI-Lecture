@@ -735,7 +735,6 @@ ScaledLaplacian::GetLinearSystem(
             case ElementType::MFEM_L: {
               switch (sdim) {
                 default: {
-                  std::cerr << " Combination not implemented yet !!! \n\n";
                   exit(EXIT_FAILURE);
                   break;
                 }
@@ -891,7 +890,6 @@ ScaledLaplacian::GetLinearSystem_v(
             case ElementType::MFEM_L: {
               switch (sdim) {
                 default: {
-                  std::cerr << " Combination not implemented yet !!! \n\n";
                   exit(EXIT_FAILURE);
                   break;
                 }
@@ -962,7 +960,6 @@ ScaledLaplacian::GetLinearSystem_v(
           int        numNodes = 0;
           switch (meshInfo.mesh.GetCellType(eleID)) {
             default: {
-              std::cerr << " Combination not implemented yet !!! \n\n";
               exit(EXIT_FAILURE);
               break;
             }

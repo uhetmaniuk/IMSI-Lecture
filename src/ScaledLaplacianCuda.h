@@ -89,7 +89,7 @@ class ScaledLaplacianCuda
       Kokkos::View<double*, CudaSpace> rhs,
       Kokkos::View<size_t*, CudaSpace> matRowPtr,
       Kokkos::View<int*, CudaSpace>    matColIdx,
-      Kokkos::View<double*, CudaSpace> matValues) const;
+      Kokkos::View<double*, CudaSpace> matValues);
 
   int const ratio = 32;  // For MFEM_L fine mesh refinement
 
@@ -104,7 +104,7 @@ class ScaledLaplacianCuda
       Kokkos::View<double*, HostSpace> rhs_h,
       Kokkos::View<size_t*, HostSpace> matRowPtr_h,
       Kokkos::View<int*, HostSpace>    matColIdx_h,
-      Kokkos::View<double*, HostSpace> matValues_h) const;
+      Kokkos::View<double*, HostSpace> matValues_h);
 
  protected:
   const MeshConnectivity<>                                     meshInfo;
@@ -239,7 +239,7 @@ ScaledLaplacianCuda::GetLinearSystem(
     Kokkos::View<double*, CudaSpace> rhs,
     Kokkos::View<size_t*, CudaSpace> matRowPtr,
     Kokkos::View<int*, CudaSpace>    matColIdx,
-    Kokkos::View<double*, CudaSpace> matValues) const
+    Kokkos::View<double*, CudaSpace> matValues)
 {
   // Get mesh info
   auto const& c2e = meshInfo.c2e;
@@ -455,7 +455,7 @@ ScaledLaplacianCuda::ProcessMFEMElements(
     Kokkos::View<double*, HostSpace> rhs_h,
     Kokkos::View<size_t*, HostSpace> matRowPtr_h,
     Kokkos::View<int*, HostSpace>    matColIdx_h,
-    Kokkos::View<double*, HostSpace> matValues_h) const
+    Kokkos::View<double*, HostSpace> matValues_h)
 {
   // Process MFEM_L elements sequentially on host
   // This uses the same logic as the original ElementaryDataMFEM_t
