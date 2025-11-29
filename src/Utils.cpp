@@ -17,7 +17,7 @@
 
 namespace IMSI {
 
-    void 1MapDegreesOfFreedom(const std::vector<int> &bdyNodes,
+    void MapDegreesOfFreedom(const std::vector<int> &bdyNodes,
                              std::vector<int> &globalToFree,
                              std::vector<int> &freeToGlobal) {
         globalToFree.assign(size(globalToFree), 0);
