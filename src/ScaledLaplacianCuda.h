@@ -353,18 +353,27 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     printf("  Color %d: %d elements\n", ic, numEle);
 
+    // Copy element list to device (eleList from rowConst is host-side!)
+    Kokkos::View<int*, CudaSpace> eleList_d("eleList", numEle);
+    auto eleList_h = Kokkos::create_mirror_view(eleList_d);
+    for (int i = 0; i < numEle; ++i) {
+      eleList_h(i) = eleList(i);
+    }
+    Kokkos::deep_copy(eleList_d, eleList_h);
+
     // Capture device views for lambda
     auto counter_d = assemblyCounter;
     auto cellTypes = cellTypes_d;
     auto nodeCoords = nodeCoords_d;
     auto cellToNode = cellToNode_d;
+    auto eleList_device = eleList_d;
 
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
         "Q1Assembly_Color",
         Kokkos::RangePolicy<CudaSpace>(0, numEle),
         KOKKOS_LAMBDA(const int ik) {
-          auto const eleID = eleList(ik);
+          auto const eleID = eleList_device(ik);
 
           // Bounds check
           if (eleID < 0 || eleID >= cellTypes.extent(0)) {
