@@ -276,14 +276,16 @@ ScaledLaplacianCuda::GetLinearSystem(
   int const numCells = meshInfo.mesh.NumberCells();
   int const numNodes = meshInfo.mesh.NumberVertices();
 
-  // Create device views for mesh data
+  // Create device views for mesh data (separate arrays for coalescing)
   Kokkos::View<int*, CudaSpace> cellTypes_d("cellTypes", numCells);
-  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * 2);  // x,y interleaved
+  Kokkos::View<double*, CudaSpace> nodeCoords_x_d("nodeCoords_x", numNodes);
+  Kokkos::View<double*, CudaSpace> nodeCoords_y_d("nodeCoords_y", numNodes);
   Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
 
   // Create host mirrors
   auto cellTypes_h = Kokkos::create_mirror_view(cellTypes_d);
-  auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
+  auto nodeCoords_x_h = Kokkos::create_mirror_view(nodeCoords_x_d);
+  auto nodeCoords_y_h = Kokkos::create_mirror_view(nodeCoords_y_d);
   auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
 
   // Fill host data (initialize cellToNode to -1 first)
@@ -302,15 +304,17 @@ ScaledLaplacianCuda::GetLinearSystem(
     }
   }
 
+  // Fill coordinate arrays separately for better coalescing
   for (int in = 0; in < numNodes; ++in) {
     auto const vertex = meshInfo.mesh.GetVertex(in);
-    nodeCoords_h(in * 2 + 0) = vertex[0];
-    nodeCoords_h(in * 2 + 1) = vertex[1];
+    nodeCoords_x_h(in) = vertex[0];
+    nodeCoords_y_h(in) = vertex[1];
   }
 
   // Copy to device
   Kokkos::deep_copy(cellTypes_d, cellTypes_h);
-  Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
+  Kokkos::deep_copy(nodeCoords_x_d, nodeCoords_x_h);
+  Kokkos::deep_copy(nodeCoords_y_d, nodeCoords_y_h);
   Kokkos::deep_copy(cellToNode_d, cellToNode_h);
 
   // Capture quadrature data for device
@@ -344,15 +348,30 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     // Capture device views for lambda
     auto cellTypes = cellTypes_d;
-    auto nodeCoords = nodeCoords_d;
+    auto nodeCoords_x = nodeCoords_x_d;
+    auto nodeCoords_y = nodeCoords_y_d;
     auto cellToNode = cellToNode_d;
     auto eleList_device = eleList_d;
 
-    // Parallel assembly for this color (no conflicts within same color)
+    // Calculate scratch memory size
+    constexpr int nNodes = fe2DQ1Cuda::numNode;
+    constexpr int dim = 2;
+    const size_t scratch_size =
+      sizeof(double) * (nNodes +                    // rele
+                        nNodes * nNodes +            // kele
+                        nNodes * dim +               // coords
+                        nNodes * (dim + 1) +         // NandGradN
+                        nNodes * dim +               // GradPhi
+                        dim * (dim + 1)) +           // pointJac
+      sizeof(int) * nNodes;                          // nodeList
+
+    // Parallel assembly using TeamPolicy for better occupancy
     Kokkos::parallel_for(
         "Q1Assembly_Color",
-        Kokkos::RangePolicy<CudaSpace>(0, numEle),
-        KOKKOS_LAMBDA(const int ik) {
+        Kokkos::TeamPolicy<CudaSpace>(numEle, Kokkos::AUTO)
+          .set_scratch_size(0, Kokkos::PerTeam(scratch_size)),
+        KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<CudaSpace>::member_type& team) {
+          auto const ik = team.league_rank();
           auto const eleID = eleList_device(ik);
 
           // Bounds check
@@ -367,35 +386,46 @@ ScaledLaplacianCuda::GetLinearSystem(
             return;  // Skip non-Q1 elements
           }
 
-          constexpr int nNodes = fe2DQ1Cuda::numNode;
-          constexpr int dim = 2;
+          // Allocate scratch memory (shared across team)
+          int* nodeList = (int*)team.team_scratch(0).get_shmem(sizeof(int) * nNodes);
+          double* coords = (double*)team.team_scratch(0).get_shmem(sizeof(double) * nNodes * dim);
+          double* rele = (double*)team.team_scratch(0).get_shmem(sizeof(double) * nNodes);
+          double* kele = (double*)team.team_scratch(0).get_shmem(sizeof(double) * nNodes * nNodes);
+          double* NandGradN_scratch = (double*)team.team_scratch(0).get_shmem(sizeof(double) * nNodes * (dim + 1));
+          double* GradPhi_scratch = (double*)team.team_scratch(0).get_shmem(sizeof(double) * nNodes * dim);
+          double* pointJac_scratch = (double*)team.team_scratch(0).get_shmem(sizeof(double) * dim * (dim + 1));
 
-          // Get element node indices and coordinates
-          int nodeList[nNodes];
-          double coords[nNodes * dim];
-          for (int i = 0; i < nNodes; ++i) {
+          // Load element connectivity and coordinates in parallel (coalesced access)
+          Kokkos::parallel_for(Kokkos::TeamThreadRange(team, nNodes), [&](const int i) {
             nodeList[i] = cellToNode(eleID, i);
-            coords[i * dim + 0] = nodeCoords(nodeList[i] * 2 + 0);
-            coords[i * dim + 1] = nodeCoords(nodeList[i] * 2 + 1);
-          }
+            coords[i * dim + 0] = nodeCoords_x(nodeList[i]);  // Coalesced!
+            coords[i * dim + 1] = nodeCoords_y(nodeList[i]);  // Coalesced!
+          });
+          team.team_barrier();
 
-          // Allocate element arrays
-          double rele[nNodes];
-          double kele[nNodes * nNodes];
-
-          // Compute element matrices
-          for (int i = 0; i < nNodes; ++i) { rele[i] = 0.0; }
-          for (int i = 0; i < nNodes * nNodes; ++i) { kele[i] = 0.0; }
+          // Initialize element arrays in parallel
+          Kokkos::parallel_for(Kokkos::TeamThreadRange(team, nNodes), [&](const int i) {
+            rele[i] = 0.0;
+          });
+          Kokkos::parallel_for(Kokkos::TeamThreadRange(team, nNodes * nNodes), [&](const int i) {
+            kele[i] = 0.0;
+          });
+          team.team_barrier();
 
           // === Inline Q1 assembly ===
           for (int iq = 0; iq < ruleLen; ++iq) {
-            double NandGradN[nNodes * (dim + 1)];
+            // Use scratch memory for NandGradN and pointJac
+            double* NandGradN = NandGradN_scratch;
+            double* pointJac = pointJac_scratch;
+
             fe2DQ1Cuda::GetValuesGradients(
                 quadXi_local(iq), quadEta_local(iq), quadZeta_local(iq), NandGradN);
 
-            // Compute Jacobian
-            double pointJac[dim * (dim + 1)];
-            for (int i = 0; i < dim * (dim + 1); ++i) { pointJac[i] = 0.0; }
+            // Compute Jacobian in parallel
+            Kokkos::parallel_for(Kokkos::TeamThreadRange(team, dim * (dim + 1)), [&](const int i) {
+              pointJac[i] = 0.0;
+            });
+            team.team_barrier();
 
             for (int jd = 0; jd <= dim; ++jd) {
               for (int id = 0; id < dim; ++id) {
@@ -416,9 +446,12 @@ ScaledLaplacianCuda::GetLinearSystem(
             double* __restrict J = &pointJac[dim];
             InverseInPlaceCuda<dim>(J, detJ);
 
-            // Transform gradients
-            double GradPhi[nNodes * dim];
-            for (int i = 0; i < nNodes * dim; ++i) { GradPhi[i] = 0.0; }
+            // Transform gradients using scratch memory
+            double* GradPhi = GradPhi_scratch;
+            Kokkos::parallel_for(Kokkos::TeamThreadRange(team, nNodes * dim), [&](const int i) {
+              GradPhi[i] = 0.0;
+            });
+            team.team_barrier();
 
             double* __restrict GradN = &NandGradN[nNodes];
             for (int jn = 0; jn < nNodes; ++jn) {
