@@ -259,6 +259,8 @@ ScaledLaplacianCuda::GetLinearSystem(
     Kokkos::View<int*, CudaSpace>    matColIdx,
     Kokkos::View<double*, CudaSpace> matValues)
 {
+  Kokkos::Timer timer;
+
   // Get mesh info
   auto const& c2e = meshInfo.c2e;
   auto const  sdim = meshInfo.mesh.GetSpatialDimension();
@@ -324,6 +326,8 @@ ScaledLaplacianCuda::GetLinearSystem(
   bool has_ax = ax.has_value();
   bool has_ay = ay.has_value();
   bool has_f = f.has_value();
+printf(" -- Prep %e \n", timer.seconds());
+  timer.reset();
 
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
@@ -333,7 +337,7 @@ ScaledLaplacianCuda::GetLinearSystem(
     if (numEle == 0) continue;
 
     printf("  Color %d: %d elements\n", ic, numEle);
-
+    timer.reset();
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, CudaSpace> eleList_d("eleList", numEle);
     auto eleList_h = Kokkos::create_mirror_view(eleList_d);
@@ -347,7 +351,8 @@ ScaledLaplacianCuda::GetLinearSystem(
     auto nodeCoords = nodeCoords_d;
     auto cellToNode = cellToNode_d;
     auto eleList_device = eleList_d;
-
+printf(" ... %e \n", timer.seconds());
+timer.reset();
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
         "Q1Assembly_Color",
@@ -356,16 +361,15 @@ ScaledLaplacianCuda::GetLinearSystem(
           auto const eleID = eleList_device(ik);
 
           // Bounds check
-          if (eleID < 0 || eleID >= cellTypes.extent(0)) {
-            return;
-          }
+          //if (eleID < 0 || eleID >= cellTypes.extent(0)) {
+          //  return;
+          //}
 
-          auto const cellType = static_cast<ElementType>(cellTypes(eleID));
-
+          //auto const cellType = static_cast<ElementType>(cellTypes(eleID));
           // Only handle Q1 elements for now
-          if (cellType != ElementType::Q1) {
-            return;  // Skip non-Q1 elements
-          }
+          //if (cellType != ElementType::Q1) {
+          //  return;  // Skip non-Q1 elements
+          //}
 
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
@@ -492,8 +496,10 @@ ScaledLaplacianCuda::GetLinearSystem(
         });
 
     Kokkos::fence();
+    printf(" fene %e \n", timer.seconds());
   }
 
+  /*
   // Handle MFEM_L elements if present (process on host)
   bool hasMFEM = false;
   for (int ic = 0; ic < meshInfo.mesh.NumberCells(); ++ic) {
@@ -526,6 +532,7 @@ ScaledLaplacianCuda::GetLinearSystem(
 
     printf("MFEM_L processing complete.\n");
   }
+  */
 }
 
 /// Implementation of ProcessMFEMElements (host-side)
