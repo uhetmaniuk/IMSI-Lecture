@@ -259,8 +259,6 @@ ScaledLaplacianCuda::GetLinearSystem(
     Kokkos::View<int*, CudaSpace>    matColIdx,
     Kokkos::View<double*, CudaSpace> matValues)
 {
-  Kokkos::Timer timer;
-
   // Get mesh info
   auto const& c2e = meshInfo.c2e;
   auto const  sdim = meshInfo.mesh.GetSpatialDimension();
@@ -291,50 +289,36 @@ ScaledLaplacianCuda::GetLinearSystem(
       });
     Kokkos::deep_copy(cellTypes_d, cellTypes_h);
   }
-  printf(" cllTypes %e \n", timer.seconds());
-  timer.reset();
 
-  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * 2);  // x,y interleaved
+  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
   {
     auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
-    /*
-    auto *cellTypes_ptr = meshInfo.mesh.GetCellType().data();
     Kokkos::parallel_for(
-      "CellTypes_Copy",
-      Kokkos::RangePolicy<HostSpace>(0, numCells),
-      KOKKOS_LAMBDA(const int ic) {
-        cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+      "NodeCoords_Copy",
+      Kokkos::RangePolicy<HostSpace>(0, numNodes),
+      KOKKOS_LAMBDA(const int in) {
+        auto const vertex = this->meshInfo.mesh.GetVertex(in);
+        nodeCoords_h(in * 2 + 0) = vertex[0];
+        nodeCoords_h(in * 2 + 1) = vertex[1];
       });
-      */
-    for (int in = 0; in < numNodes; ++in) {
-      auto const vertex = meshInfo.mesh.GetVertex(in);
-      nodeCoords_h(in * 2 + 0) = vertex[0];
-      nodeCoords_h(in * 2 + 1) = vertex[1];
-    }
     Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
   }
-  printf(" nodeCoords %e \n", timer.seconds());
-  timer.reset();
 
-  Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
-  auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
-  // Fill host data (initialize cellToNode to -1 first)
-  for (int ic = 0; ic < numCells; ++ic) {
-
-    // Initialize to -1 (invalid)
-    for (int in = 0; in < 4; ++in) {
-      cellToNode_h(ic, in) = -1;
-    }
-
-    // Fill actual node indices
-    auto const& nodeList = meshInfo.mesh.NodeList(ic);
-    for (int in = 0; in < nodeList.size() && in < 4; ++in) {
-      cellToNode_h(ic, in) = nodeList[in];
-    }
+  Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4); // Q1 has 4 nodes max
+  {
+    auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
+    Kokkos::parallel_for(
+      "CellToNodes_Copy",
+      Kokkos::RangePolicy<HostSpace>(0, numCells),
+      KOKKOS_LAMBDA(const int ic) {
+        auto const& nodeList = meshInfo.mesh.NodeList(ic);
+        auto c2n_ic = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
+        for (int in = 0; in < nodeList.size() && in < 4; ++in) {
+          c2n_ic(in) = nodeList[in];
+        }
+      });
+    Kokkos::deep_copy(cellToNode_d, cellToNode_h);
   }
-
-  // Copy to device
-  Kokkos::deep_copy(cellToNode_d, cellToNode_h);
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -347,33 +331,26 @@ ScaledLaplacianCuda::GetLinearSystem(
   bool has_ax = ax.has_value();
   bool has_ay = ay.has_value();
   bool has_f = f.has_value();
-printf(" -- Prep %e \n", timer.seconds());
-  timer.reset();
 
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
-    auto const eleList = c2e.rowConst(ic);
-    auto const numEle = eleList.length;
-
+    auto const numEle = c2e.row_map(ic + 1) - c2e.row_map(ic);
     if (numEle == 0) continue;
-
     printf("  Color %d: %d elements\n", ic, numEle);
-    timer.reset();
+
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, CudaSpace> eleList_d("eleList", numEle);
-    auto eleList_h = Kokkos::create_mirror_view(eleList_d);
-    for (int i = 0; i < numEle; ++i) {
-      eleList_h(i) = eleList(i);
+    {
+      auto eleList_h = Kokkos::subview(c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
+      Kokkos::deep_copy(eleList_d, eleList_h);
     }
-    Kokkos::deep_copy(eleList_d, eleList_h);
 
     // Capture device views for lambda
     auto cellTypes = cellTypes_d;
     auto nodeCoords = nodeCoords_d;
     auto cellToNode = cellToNode_d;
     auto eleList_device = eleList_d;
-printf(" ... %e \n", timer.seconds());
-timer.reset();
+
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
         "Q1Assembly_Color",
@@ -381,27 +358,22 @@ timer.reset();
         KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList_device(ik);
 
-          // Bounds check
-          //if (eleID < 0 || eleID >= cellTypes.extent(0)) {
-          //  return;
-          //}
-
-          //auto const cellType = static_cast<ElementType>(cellTypes(eleID));
           // Only handle Q1 elements for now
-          //if (cellType != ElementType::Q1) {
-          //  return;  // Skip non-Q1 elements
-          //}
+          auto const cellType = static_cast<ElementType>(cellTypes(eleID));
+          if (cellType != ElementType::Q1) {
+            return;  // Skip non-Q1 elements
+          }
 
           constexpr int nNodes = fe2DQ1Cuda::numNode;
           constexpr int dim = 2;
 
-          // Get element node indices and coordinates
+          // Get locally element node indices and coordinates
           int nodeList[nNodes];
           double coords[nNodes * dim];
           for (int i = 0; i < nNodes; ++i) {
             nodeList[i] = cellToNode(eleID, i);
-            coords[i * dim + 0] = nodeCoords(nodeList[i] * 2 + 0);
-            coords[i * dim + 1] = nodeCoords(nodeList[i] * 2 + 1);
+            coords[i * dim + 0] = nodeCoords(nodeList[i] * dim + 0);
+            coords[i * dim + 1] = nodeCoords(nodeList[i] * dim + 1);
           }
 
           // Allocate element arrays
@@ -413,13 +385,15 @@ timer.reset();
           for (int i = 0; i < nNodes * nNodes; ++i) { kele[i] = 0.0; }
 
           // === Inline Q1 assembly ===
+          double NandGradN[nNodes * (dim + 1)];
+          double pointJac[dim * (dim + 1)];
+          double GradPhi[nNodes * dim];
+
           for (int iq = 0; iq < ruleLen; ++iq) {
-            double NandGradN[nNodes * (dim + 1)];
             fe2DQ1Cuda::GetValuesGradients(
                 quadXi_local(iq), quadEta_local(iq), quadZeta_local(iq), NandGradN);
 
             // Compute Jacobian
-            double pointJac[dim * (dim + 1)];
             for (int jd = 0; jd <= dim; ++jd) {
               for (int id = 0; id < dim; ++id) {
                 double jacEntry = 0.0;
@@ -440,7 +414,6 @@ timer.reset();
             InverseInPlaceCuda<dim>(J, detJ);
 
             // Transform gradients
-            double GradPhi[nNodes * dim];
             double* __restrict GradN = &NandGradN[nNodes];
             for (int jn = 0; jn < nNodes; ++jn) {
               for (int in = 0; in < dim; ++in) {
@@ -506,7 +479,6 @@ timer.reset();
             auto const irow = nodeList[in];
             auto const colBegin = &matColIdx(matRowPtr(irow));
             auto const colEnd = &matColIdx(matRowPtr(irow + 1));
-
             for (int jn = 0; jn < nNodes; ++jn) {
               // Binary search for column position
               int const numCols = colEnd - colBegin;
@@ -517,7 +489,6 @@ timer.reset();
         });
 
     Kokkos::fence();
-    printf(" fene %e \n", timer.seconds());
   }
 
   /*
