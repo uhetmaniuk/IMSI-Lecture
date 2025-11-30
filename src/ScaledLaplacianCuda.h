@@ -280,17 +280,46 @@ ScaledLaplacianCuda::GetLinearSystem(
 
   // Create device views for mesh data
   Kokkos::View<int*, CudaSpace> cellTypes_d("cellTypes", numCells);
+  {
+    auto cellTypes_h = Kokkos::create_mirror_view(cellTypes_d);
+    auto *cellTypes_ptr = meshInfo.mesh.GetCellType().data();
+    Kokkos::parallel_for(
+      "CellTypes_Copy",
+      Kokkos::RangePolicy<HostSpace>(0, numCells),
+      KOKKOS_LAMBDA(const int ic) {
+        cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+      });
+    Kokkos::deep_copy(cellTypes_d, cellTypes_h);
+  }
+  printf(" cllTypes %e \n", timer.seconds());
+  timer.reset();
+
   Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * 2);  // x,y interleaved
+  {
+    auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
+    /*
+    auto *cellTypes_ptr = meshInfo.mesh.GetCellType().data();
+    Kokkos::parallel_for(
+      "CellTypes_Copy",
+      Kokkos::RangePolicy<HostSpace>(0, numCells),
+      KOKKOS_LAMBDA(const int ic) {
+        cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+      });
+      */
+    for (int in = 0; in < numNodes; ++in) {
+      auto const vertex = meshInfo.mesh.GetVertex(in);
+      nodeCoords_h(in * 2 + 0) = vertex[0];
+      nodeCoords_h(in * 2 + 1) = vertex[1];
+    }
+    Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
+  }
+  printf(" nodeCoords %e \n", timer.seconds());
+  timer.reset();
+
   Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
-
-  // Create host mirrors
-  auto cellTypes_h = Kokkos::create_mirror_view(cellTypes_d);
-  auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
   auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
-
   // Fill host data (initialize cellToNode to -1 first)
   for (int ic = 0; ic < numCells; ++ic) {
-    cellTypes_h(ic) = static_cast<int>(meshInfo.mesh.GetCellType(ic));
 
     // Initialize to -1 (invalid)
     for (int in = 0; in < 4; ++in) {
@@ -304,15 +333,7 @@ ScaledLaplacianCuda::GetLinearSystem(
     }
   }
 
-  for (int in = 0; in < numNodes; ++in) {
-    auto const vertex = meshInfo.mesh.GetVertex(in);
-    nodeCoords_h(in * 2 + 0) = vertex[0];
-    nodeCoords_h(in * 2 + 1) = vertex[1];
-  }
-
   // Copy to device
-  Kokkos::deep_copy(cellTypes_d, cellTypes_h);
-  Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
   Kokkos::deep_copy(cellToNode_d, cellToNode_h);
 
   // Capture quadrature data for device

@@ -63,6 +63,10 @@ class Mesh
     return vertex_x.size();
   };
 
+  [[nodiscard]] const std::vector<ElementType>& GetCellType() const {
+    return cellType;
+  }
+
   /// Returns the type of element in the specified cell
   /// \return Element type
   [[nodiscard]] ElementType
