@@ -9,7 +9,7 @@
 
 int main(int argc, char **argv) {
 
-    const int rep = 10000;
+    const int rep = 8192;
     double sum = 0.;
     using real = float;
 
@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
         std::cout << " p   |   for Loop   for Comp.      Kokkos";
         std::cout << "\n";
 
-        for (int pk = 4096; pk < 10000; pk *= 2) {
+        for (int pk = 32; pk < 80000; pk *= 2) {
             for (int p = pk - 2; p <= pk + 2; p += 1) {
                 Kokkos::Random_XorShift64_Pool<> random_pool(/*seed=*/12345);
                 auto generator = random_pool.get_state();
@@ -133,9 +133,97 @@ int main(int argc, char **argv) {
                 }
                 std::cout << dt_ref.count() / dt33.count() << "  ";
                 //--- Use for debugging
-                // std::cout << " sum " << sum << "\n";
+                //std::cout << " sum " << sum << "\n";
 
-                std::cout << std::endl;
+              sum = 0.0;
+              r.assign(p, 0.0);
+              auto* rPtr = r.data();
+              auto* xPtr = x.data();
+              auto* yPtr = y.data();
+              auto* zPtr = z.data();
+              std::chrono::duration<double> dtSerial(0);
+              for (int ir = 0; ir < rep; ++ir) {
+                auto start = std::chrono::high_resolution_clock::now();
+                Kokkos::parallel_for(
+                  "Serial",
+                  Kokkos::RangePolicy<Kokkos::Serial>(0, p),
+                  KOKKOS_LAMBDA(const int k) {
+                  rPtr[k] = xPtr[k] * xPtr[k] + yPtr[k] * yPtr[k] + zPtr[k] * zPtr[k];
+                });
+                auto end = std::chrono::high_resolution_clock::now();
+                dtSerial += end - start;
+                sum += r[0] + r[p - 1];
+              }
+              std::cout << dt_ref.count() / dtSerial.count() << "  ";
+              //--- Use for debugging
+              //std::cout << " sum " << sum << "\n";
+
+              sum = 0.0;
+              r.assign(p, 0.0);
+              std::chrono::duration<double> dtOpenMP(0);
+              for (int ir = 0; ir < rep; ++ir) {
+                auto start = std::chrono::high_resolution_clock::now();
+                Kokkos::parallel_for(
+                  "OMP",
+                  Kokkos::RangePolicy<Kokkos::OpenMP>(0, p),
+                  KOKKOS_LAMBDA(const int k) {
+                  rPtr[k] = xPtr[k] * xPtr[k] + yPtr[k] * yPtr[k] + zPtr[k] * zPtr[k];
+                });
+                auto end = std::chrono::high_resolution_clock::now();
+                dtOpenMP += end - start;
+                sum += r[0] + r[p - 1];
+              }
+              std::cout << dt_ref.count() / dtOpenMP.count() << "  ";
+              //--- Use for debugging
+              //std::cout << " sum " << sum << "\n";
+
+              if (p % 4 == 0) {
+                sum = 0.0;
+                r.assign(p, 0.0);
+                std::chrono::duration<double> dt44(0);
+                // TeamPolicy(League Size, Team Size, Vector Length)
+                Kokkos::TeamPolicy<Kokkos::Serial> policy(p/4, 1, 4);
+                for (int ir = 0; ir < rep; ++ir) {
+                  auto start = std::chrono::high_resolution_clock::now();
+                  Kokkos::parallel_for(policy, [&](const Kokkos::TeamPolicy<Kokkos::Serial>::member_type& team_member)
+                  {
+                    int k = team_member.league_rank();
+                    Kokkos::parallel_for(Kokkos::ThreadVectorRange(team_member, 4*k, 4*k + 4),
+                                [&](const int j) {
+                                      r[j] = x[j] * x[j] + y[j] * y[j] + z[j] * z[j];
+                                });
+                  });
+                  auto end = std::chrono::high_resolution_clock::now();
+                  dt44 += end - start;
+                  sum += r[0] + r[p - 1];
+                }
+                std::cout << dt_ref.count() / dt44.count() << "  ";
+              }
+
+              if (p % 4 == 0) {
+                sum = 0.0;
+                r.assign(p, 0.0);
+                std::chrono::duration<double> dt44(0);
+                // TeamPolicy(League Size, Team Size, Vector Length)
+                Kokkos::TeamPolicy<Kokkos::OpenMP> policy(p/4, 1, 4);
+                for (int ir = 0; ir < rep; ++ir) {
+                  auto start = std::chrono::high_resolution_clock::now();
+                  Kokkos::parallel_for(policy, [&](const Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type& team_member)
+                  {
+                    int k = team_member.league_rank();
+                    Kokkos::parallel_for(Kokkos::ThreadVectorRange(team_member, 4*k, 4*k + 4),
+                                [&](const int j) {
+                                      r[j] = x[j] * x[j] + y[j] * y[j] + z[j] * z[j];
+                                });
+                  });
+                  auto end = std::chrono::high_resolution_clock::now();
+                  dt44 += end - start;
+                  sum += r[0] + r[p - 1];
+                }
+                std::cout << dt_ref.count() / dt44.count() << "  ";
+              }
+
+              std::cout << std::endl;
 
             }
         }

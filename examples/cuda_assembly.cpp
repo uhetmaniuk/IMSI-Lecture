@@ -46,14 +46,27 @@ int main(int argc, char* argv[])
     // Problem setup
     // ========================================================================
 
-    // Define material coefficients and forcing term
-    auto alpha_x = [](double x, double y, double z) -> double { return 1.0; };
-    auto beta_y  = [](double x, double y, double z) -> double { return 1.0; };
-    auto f_rhs   = [](double x, double y, double z) -> double {
-      // Manufactured solution: u = sin(pi*x) * sin(pi*y)
-      // => -Laplacian(u) = 2*pi^2 * sin(pi*x) * sin(pi*y)
-      constexpr double pi = 3.14159265358979323846;
-      return 2.0 * pi * pi * std::sin(pi * x) * std::sin(pi * y);
+    // Define material coefficients and forcing term as functors
+    // These must be KOKKOS_INLINE_FUNCTION compatible for device execution
+    struct AxFunctor {
+      KOKKOS_INLINE_FUNCTION
+      double operator()(double x, double y, double z) const { return 1.0; }
+    };
+
+    struct AyFunctor {
+      KOKKOS_INLINE_FUNCTION
+      double operator()(double x, double y, double z) const { return 1.0; }
+    };
+
+    struct FFunctor {
+      KOKKOS_INLINE_FUNCTION
+      double operator()(double x, double y, double z) const {
+        // Manufactured solution: u = sin(pi*x) * sin(pi*y)
+        // => -Laplacian(u) = 2*pi^2 * sin(pi*x) * sin(pi*y)
+        constexpr double pi = 3.14159265358979323846;
+        using Kokkos::sin;  // Device-safe sin function
+        return 2.0 * pi * pi * sin(pi * x) * sin(pi * y);
+      }
     };
 
     // ========================================================================
@@ -131,7 +144,14 @@ int main(int argc, char* argv[])
 
     std::cout << "\n=== Starting CUDA Assembly ===" << std::endl;
 
-    ScaledLaplacianCuda scalarLap(meshConn, alpha_x, beta_y, f_rhs, RuleType::Gauss, 2);
+    // Create coefficient functor instances
+    AxFunctor ax_func;
+    AyFunctor ay_func;
+    FFunctor f_func;
+
+    // Instantiate ScaledLaplacianCuda with functor types
+    auto scalarLap = ScaledLaplacianCuda<AxFunctor, AyFunctor, FFunctor>(
+        meshConn, RuleType::Gauss, 2, ax_func, ay_func, f_func);
 
     Kokkos::Timer timer;
     scalarLap.GetLinearSystem(rhs_d, matRowPtr_d, matColIdx_d, matValues_d);
