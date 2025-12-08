@@ -959,10 +959,10 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         "MFEMAssembly_Color",
         team_policy,
         KOKKOS_LAMBDA(const Kokkos::TeamPolicy<CudaSpace>::member_type& teamMember) {
-          const int ik = (team_member.league_rank() * team_member.team_size() + teamMember.team_rank()) / warpSize;
-          if (ik < numEle) {
-            auto const eleID = eleList_device(ik);
-          }
+//          const int ik = (team_member.league_rank() * team_member.team_size() + teamMember.team_rank()) / warpSize;
+//          if (ik < numEle) {
+//            auto const eleID = eleList_device(ik);
+//          }
           //
 ///          Kokkos::parallel_for("QQQQ", )
       /*
