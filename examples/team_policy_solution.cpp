@@ -16,30 +16,36 @@
 
 #include <Kokkos_Core.hpp>
 
+#ifdef KOKKOS_ENABLE_CUDA
 // Functors for CUDA nested parallelism (must be at namespace scope)
-struct CudaTeamFunctor3 {
-  Kokkos::View<int, Kokkos::CudaSpace> count;
+struct CudaTeamFunctor3
+{
+  Kokkos::View<int, Kokkos::CudaSpace>                  count;
   typedef Kokkos::TeamPolicy<Kokkos::Cuda>::member_type team_member;
 
   KOKKOS_FUNCTION
-  void operator()(const team_member& thread) const {
+  void
+  operator()(const team_member& thread) const
+  {
     Kokkos::parallel_for(
-        Kokkos::TeamThreadRange(thread, 3),
-        [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+        Kokkos::TeamThreadRange(thread, 3), [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
   }
 };
 
-struct CudaTeamFunctor5 {
-  Kokkos::View<int, Kokkos::CudaSpace> count;
+struct CudaTeamFunctor5
+{
+  Kokkos::View<int, Kokkos::CudaSpace>                  count;
   typedef Kokkos::TeamPolicy<Kokkos::Cuda>::member_type team_member;
 
   KOKKOS_FUNCTION
-  void operator()(const team_member& thread) const {
+  void
+  operator()(const team_member& thread) const
+  {
     Kokkos::parallel_for(
-        Kokkos::TeamThreadRange(thread, 5),
-        [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+        Kokkos::TeamThreadRange(thread, 5), [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
   }
 };
+#endif
 
 int
 main(int argc, char* argv[])
@@ -50,7 +56,7 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, Kokkos::AUTO);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int, Kokkos::HostSpace>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
       Kokkos::parallel_for(
           "OpenMP1", policy, KOKKOS_LAMBDA(const team_member& thread) { Kokkos::atomic_fetch_add(&count(), 1); });
       printf(
@@ -64,7 +70,7 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, 3);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int, Kokkos::HostSpace>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
       Kokkos::parallel_for(
           "OpenMP2", policy, KOKKOS_LAMBDA(const team_member& thread) { Kokkos::atomic_fetch_add(&count(), 1); });
       printf(
@@ -75,7 +81,7 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, Kokkos::AUTO);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int, Kokkos::HostSpace>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
       Kokkos::parallel_for(
           "OpenMP3", policy, KOKKOS_LAMBDA(const team_member& thread) {
             for (int k = 0; k < 3; ++k) { Kokkos::atomic_fetch_add(&count(), 1); }
@@ -91,7 +97,7 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, 3);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int, Kokkos::HostSpace>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
       Kokkos::parallel_for(
           "OpenMP4", policy, KOKKOS_LAMBDA(const team_member& thread) {
             for (int k = 0; k < 5; ++k) { Kokkos::atomic_fetch_add(&count(), 1); }
@@ -107,17 +113,19 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy with functor to avoid nested lambda
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, Kokkos::AUTO);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
 
       // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int> count;
+      struct TeamFunctor
+      {
+        Kokkos::View<int, Kokkos::HostSpace> count;
 
         KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
+        void
+        operator()(const team_member& thread) const
+        {
           Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 3),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+              Kokkos::TeamThreadRange(thread, 3), [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
         }
       };
 
@@ -133,17 +141,19 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy with functor to avoid nested lambda
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, 3);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
 
       // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int> count;
+      struct TeamFunctor
+      {
+        Kokkos::View<int, Kokkos::HostSpace> count;
 
         KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
+        void
+        operator()(const team_member& thread) const
+        {
           Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 5),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+              Kokkos::TeamThreadRange(thread, 5), [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
         }
       };
 
@@ -159,17 +169,19 @@ main(int argc, char* argv[])
       /// OpenMP - TeamPolicy with functor to avoid nested lambda
       Kokkos::TeamPolicy<Kokkos::OpenMP>                      policy(27, 7);
       typedef Kokkos::TeamPolicy<Kokkos::OpenMP>::member_type team_member;
-      Kokkos::View<int>                                       count("Count");
+      Kokkos::View<int, Kokkos::HostSpace>                    count("Count");
 
       // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int> count;
+      struct TeamFunctor
+      {
+        Kokkos::View<int, Kokkos::HostSpace> count;
 
         KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
+        void
+        operator()(const team_member& thread) const
+        {
           Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 5),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+              Kokkos::TeamThreadRange(thread, 5), [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
         }
       };
 
