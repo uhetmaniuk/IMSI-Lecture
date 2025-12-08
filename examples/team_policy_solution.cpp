@@ -16,6 +16,31 @@
 
 #include <Kokkos_Core.hpp>
 
+// Functors for CUDA nested parallelism (must be at namespace scope)
+struct CudaTeamFunctor3 {
+  Kokkos::View<int, Kokkos::CudaSpace> count;
+  typedef Kokkos::TeamPolicy<Kokkos::Cuda>::member_type team_member;
+
+  KOKKOS_FUNCTION
+  void operator()(const team_member& thread) const {
+    Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(thread, 3),
+        [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+  }
+};
+
+struct CudaTeamFunctor5 {
+  Kokkos::View<int, Kokkos::CudaSpace> count;
+  typedef Kokkos::TeamPolicy<Kokkos::Cuda>::member_type team_member;
+
+  KOKKOS_FUNCTION
+  void operator()(const team_member& thread) const {
+    Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(thread, 5),
+        [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
+  }
+};
+
 int
 main(int argc, char* argv[])
 {
@@ -235,19 +260,7 @@ main(int argc, char* argv[])
       Kokkos::View<int, Kokkos::CudaSpace>                  count("Count");
       auto                                                  count_host = Kokkos::create_mirror_view(count);
 
-      // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int, Kokkos::CudaSpace> count;
-
-        KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
-          Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 3),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
-        }
-      };
-
-      Kokkos::parallel_for("CUDA5", policy, TeamFunctor{count});
+      Kokkos::parallel_for("CUDA5", policy, CudaTeamFunctor3{count});
       Kokkos::fence();
       Kokkos::deep_copy(count_host, count);
       printf(
@@ -264,19 +277,7 @@ main(int argc, char* argv[])
       Kokkos::View<int, Kokkos::CudaSpace>                  count("Count");
       auto                                                  count_host = Kokkos::create_mirror_view(count);
 
-      // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int, Kokkos::CudaSpace> count;
-
-        KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
-          Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 5),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
-        }
-      };
-
-      Kokkos::parallel_for("CUDA6", policy, TeamFunctor{count});
+      Kokkos::parallel_for("CUDA6", policy, CudaTeamFunctor5{count});
       Kokkos::fence();
       Kokkos::deep_copy(count_host, count);
       printf(
@@ -293,19 +294,7 @@ main(int argc, char* argv[])
       Kokkos::View<int, Kokkos::CudaSpace>                  count("Count");
       auto                                                  count_host = Kokkos::create_mirror_view(count);
 
-      // Functor for outer parallel_for
-      struct TeamFunctor {
-        Kokkos::View<int, Kokkos::CudaSpace> count;
-
-        KOKKOS_FUNCTION
-        void operator()(const team_member& thread) const {
-          Kokkos::parallel_for(
-              Kokkos::TeamThreadRange(thread, 5),
-              [=](const int& i) { Kokkos::atomic_fetch_add(&count(), 1); });
-        }
-      };
-
-      Kokkos::parallel_for("CUDA7", policy, TeamFunctor{count});
+      Kokkos::parallel_for("CUDA7", policy, CudaTeamFunctor5{count});
       Kokkos::fence();
       Kokkos::deep_copy(count_host, count);
       printf(
