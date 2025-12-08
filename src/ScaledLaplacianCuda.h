@@ -598,7 +598,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
     Kokkos::parallel_for(
       "CellTypes_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numCells),
-      KOKKOS_LAMBDA(const int ic) {
+      [=](const int ic) {
         cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
       });
     Kokkos::deep_copy(cellTypes_d, cellTypes_h);
@@ -607,11 +607,12 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
   Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
   {
     auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
+    auto& mesh_ref = meshInfo.mesh;
     Kokkos::parallel_for(
       "NodeCoords_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numNodes),
-      KOKKOS_LAMBDA(const int in) {
-        auto const vertex = this->meshInfo.mesh.GetVertex(in);
+      [=, &mesh_ref](const int in) {
+        auto const vertex = mesh_ref.GetVertex(in);
         nodeCoords_h(in * 2 + 0) = vertex[0];
         nodeCoords_h(in * 2 + 1) = vertex[1];
       });
@@ -621,11 +622,12 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
   Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4); // Q1 has 4 nodes max
   {
     auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
+    auto& mesh_ref = meshInfo.mesh;
     Kokkos::parallel_for(
       "CellToNodes_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numCells),
-      KOKKOS_LAMBDA(const int ic) {
-        auto const& nodeList = meshInfo.mesh.NodeList(ic);
+      [=, &mesh_ref](const int ic) {
+        auto const& nodeList = mesh_ref.NodeList(ic);
         auto c2n_ic = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
         for (int in = 0; in < nodeList.size() && in < 4; ++in) {
           c2n_ic(in) = nodeList[in];
@@ -879,7 +881,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     Kokkos::parallel_for(
       "CellTypes_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numCells),
-      KOKKOS_LAMBDA(const int ic) {
+      [=](const int ic) {
         cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
       });
     Kokkos::deep_copy(cellTypes_d, cellTypes_h);
@@ -888,11 +890,12 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
   {
     auto nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
+    auto& mesh_ref = meshInfo.mesh;
     Kokkos::parallel_for(
       "NodeCoords_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numNodes),
-      KOKKOS_LAMBDA(const int in) {
-        auto const vertex = this->meshInfo.mesh.GetVertex(in);
+      [=, &mesh_ref](const int in) {
+        auto const vertex = mesh_ref.GetVertex(in);
         nodeCoords_h(in * 2 + 0) = vertex[0];
         nodeCoords_h(in * 2 + 1) = vertex[1];
       });
@@ -902,11 +905,12 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4); // Q1 has 4 nodes max
   {
     auto cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
+    auto& mesh_ref = meshInfo.mesh;
     Kokkos::parallel_for(
       "CellToNodes_Copy",
       Kokkos::RangePolicy<HostSpace>(0, numCells),
-      KOKKOS_LAMBDA(const int ic) {
-        auto const& nodeList = meshInfo.mesh.NodeList(ic);
+      [=, &mesh_ref](const int ic) {
+        auto const& nodeList = mesh_ref.NodeList(ic);
         auto c2n_ic = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
         for (int in = 0; in < nodeList.size() && in < 4; ++in) {
           c2n_ic(in) = nodeList[in];
