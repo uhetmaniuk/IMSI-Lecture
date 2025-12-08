@@ -23,6 +23,30 @@
 
 using namespace IMSI;
 
+// Define material coefficients and forcing term as functors at namespace scope
+// These must be KOKKOS_INLINE_FUNCTION compatible for device execution
+// NOTE: Must be at namespace scope for CUDA (cannot be local types in main())
+struct AxFunctor {
+  KOKKOS_INLINE_FUNCTION
+  double operator()(double x, double y, double z) const { return 1.0; }
+};
+
+struct AyFunctor {
+  KOKKOS_INLINE_FUNCTION
+  double operator()(double x, double y, double z) const { return 1.0; }
+};
+
+struct FFunctor {
+  KOKKOS_INLINE_FUNCTION
+  double operator()(double x, double y, double z) const {
+    // Manufactured solution: u = sin(pi*x) * sin(pi*y)
+    // => -Laplacian(u) = 2*pi^2 * sin(pi*x) * sin(pi*y)
+    constexpr double pi = 3.14159265358979323846;
+    using Kokkos::sin;  // Device-safe sin function
+    return 2.0 * pi * pi * sin(pi * x) * sin(pi * y);
+  }
+};
+
 int main(int argc, char* argv[])
 {
   Kokkos::initialize(argc, argv);
@@ -45,29 +69,6 @@ int main(int argc, char* argv[])
     // ========================================================================
     // Problem setup
     // ========================================================================
-
-    // Define material coefficients and forcing term as functors
-    // These must be KOKKOS_INLINE_FUNCTION compatible for device execution
-    struct AxFunctor {
-      KOKKOS_INLINE_FUNCTION
-      double operator()(double x, double y, double z) const { return 1.0; }
-    };
-
-    struct AyFunctor {
-      KOKKOS_INLINE_FUNCTION
-      double operator()(double x, double y, double z) const { return 1.0; }
-    };
-
-    struct FFunctor {
-      KOKKOS_INLINE_FUNCTION
-      double operator()(double x, double y, double z) const {
-        // Manufactured solution: u = sin(pi*x) * sin(pi*y)
-        // => -Laplacian(u) = 2*pi^2 * sin(pi*x) * sin(pi*y)
-        constexpr double pi = 3.14159265358979323846;
-        using Kokkos::sin;  // Device-safe sin function
-        return 2.0 * pi * pi * sin(pi * x) * sin(pi * y);
-      }
-    };
 
     // ========================================================================
     // Mesh generation
