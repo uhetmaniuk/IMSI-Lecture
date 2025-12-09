@@ -82,10 +82,6 @@ struct MFEMAssemblyFunctor
     // Allocate scratch pad memory at team level (level 1)
     // 2 vectors of size numFineNodes
     scratch_double_1d rhs(teamMember.team_scratch(1), numFineNodes);
-    // Initialize vectors to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int i) {
-      rhs(i)      = 0.0;
-    });
 
     // Extract globalToFree and freeToGlobal mappings for interior DOFs
     // Interior DOFs are those where (ix > 0) && (iy > 0) && (ix <= ratio) && (iy <= ratio)
@@ -101,8 +97,19 @@ struct MFEMAssemblyFunctor
     scratch_int_1d globalToBoundary(teamMember.team_scratch(1), numFineNodes);
     scratch_int_1d boundaryToGlobal(teamMember.team_scratch(1), numBoundaryDofs);
 
-    // Initialize globalToFree to -1 (indicating constrained/boundary DOF)
+    // Setup basis functions on boundaries
+    // phi is a matrix of size (numVectors x numFineNodes) stored in column-major order
+    // Each column represents one basis function evaluated at all fine nodes
+    scratch_double_1d phi(teamMember.team_scratch(1), numVectors * numFineNodes);
+
+    // Initialize phi to zero
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) {
+      phi(i) = 0.0;
+    });
+
+    // Initialize rhs to 0, globalToFree to -1 (indicating constrained/boundary DOF)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int i) {
+      rhs(i)      = 0;
       globalToFree(i) = -1;
       globalToBoundary(i) = -1;
     });
@@ -116,17 +123,19 @@ struct MFEMAssemblyFunctor
       utmp(i) = 0.0;
     });
 
+    // Set a barrier as we will update phi, globalToFree, freeToGlobal, boundaryToGlobal, globalToBoundary
     teamMember.team_barrier();
 
-    // Build both interior and boundary mappings in a single loop
+    // Build DOF mappings and corner basis functions (serial operations)
     Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      // Build both interior and boundary mappings
       int freeCount     = 0;
       int boundaryCount = 0;
       for (int iy = 0; iy <= ratio; ++iy) {
         for (int ix = 0; ix <= ratio; ++ix) {
           int const nodeID = ix + iy * (ratio + 1);
           // Check if interior or boundary
-          if ((ix > 0) && (iy > 0) && (ix < ratio) && (iy < ratio)) {
+          if ((ix > 0) && (ix < ratio) && (iy > 0) && (iy < ratio)) {
             // Interior node
             globalToFree(nodeID)       = freeCount;
             freeToGlobal(freeCount)    = nodeID;
@@ -139,56 +148,46 @@ struct MFEMAssemblyFunctor
           }
         }
       }
+      // Handle 4 corners for phi basis functions (avoids race conditions)
+      // Corner (0, 0) - Basis 0
+      phi(0 + 0 * numFineNodes) = 1.0;
+      // Corner (ratio, 0) - Basis 1
+      int in = ratio;
+      phi(in + 1 * numFineNodes) = 1.0;
+      // Corner (0, ratio) - Basis 3
+      in = ratio * (ratio + 1);
+      phi(in + 3 * numFineNodes) = 1.0;
+      // Corner (ratio, ratio) - Basis 2
+      in = ratio + ratio * (ratio + 1);
+      phi(in + 2 * numFineNodes) = 1.0;
     });
-    teamMember.team_barrier();
 
-    // Setup basis functions on boundaries
-    // phi is a matrix of size (numVectors x numFineNodes) stored in column-major order
-    // Each column represents one basis function evaluated at all fine nodes
-    scratch_double_1d phi(teamMember.team_scratch(1), numVectors * numFineNodes);
-
-    // Initialize phi to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) {
-      phi(i) = 0.0;
-    });
-    teamMember.team_barrier();
-
-    // Build boundary basis functions in parallel
+    // Build boundary basis functions in parallel (skip corners)
     // Left and right edges (ix = 0 and ix = ratio)
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, ratio + 1), [&](int iy) {
-      double const eta = double(iy) / double(ratio);
-
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, 1, ratio), [&](int is) {
+      double const s = double(is) / double(ratio);  // abscissa along an edge
       // Left edge (ix = 0)
-      int ix              = 0;
-      int in              = ix + iy * (ratio + 1);
-      phi(in + 0 * numFineNodes) = 1.0 - eta;  // Basis function 0
-      phi(in + 3 * numFineNodes) = eta;        // Basis function 3
-
+      int in = is * (ratio + 1);
+      phi(in + 0 * numFineNodes) = 1.0 - s;  // Basis function 0
+      phi(in + 3 * numFineNodes) = s;        // Basis function 3
       // Right edge (ix = ratio)
-      ix                     = ratio;
-      in                     = ix + iy * (ratio + 1);
-      phi(in + 1 * numFineNodes) = 1.0 - eta;  // Basis function 1
-      phi(in + 2 * numFineNodes) = eta;        // Basis function 2
+      in = ratio + is * (ratio + 1);
+      phi(in + 1 * numFineNodes) = 1.0 - s;  // Basis function 1
+      phi(in + 2 * numFineNodes) = s;        // Basis function 2
     });
-    teamMember.team_barrier();
 
-    // Bottom and top edges (iy = 0 and iy = ratio)
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, ratio + 1), [&](int ix) {
-      double const xi = double(ix) / double(ratio);
-
+    // Bottom and top edges (iy = 0 and iy = ratio, skip corners)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, 1, ratio), [&](int is) {
+      double const s = double(is) / double(ratio);  // abscissa along an edge
       // Bottom edge (iy = 0)
-      int iy              = 0;
-      int in              = ix + iy * (ratio + 1);
-      phi(in + 0 * numFineNodes) = 1.0 - xi;  // Basis function 0
-      phi(in + 1 * numFineNodes) = xi;        // Basis function 1
-
+      int in = is;
+      phi(in + 0 * numFineNodes) = 1.0 - s;  // Basis function 0
+      phi(in + 1 * numFineNodes) = s;        // Basis function 1
       // Top edge (iy = ratio)
-      iy                     = ratio;
-      in                     = ix + iy * (ratio + 1);
-      phi(in + 3 * numFineNodes) = 1.0 - xi;  // Basis function 3
-      phi(in + 2 * numFineNodes) = xi;        // Basis function 2
+      in = is + ratio * (ratio + 1);
+      phi(in + 3 * numFineNodes) = 1.0 - s;  // Basis function 3
+      phi(in + 2 * numFineNodes) = s;        // Basis function 2
     });
-    teamMember.team_barrier();
 
     // Build K_ii: CSR matrix for interior DOFs only
     // CSR matrix row pointer (we'll compute actual nnz before allocating colIdx and values)
@@ -203,14 +202,25 @@ struct MFEMAssemblyFunctor
 
       // Count interior neighbors only
       int count = 1;  // Diagonal
-      if ((ix > 1) && (iy > 1)) count++;                                // SW neighbor
-      if ((iy > 1)) count++;                                            // S neighbor
-      if ((ix < ratio - 1) && (iy > 1)) count++;                        // SE neighbor
-      if ((ix > 1)) count++;                                            // W neighbor
-      if ((ix < ratio - 1)) count++;                                    // E neighbor
-      if ((ix > 1) && (iy < ratio - 1)) count++;                        // NW neighbor
-      if ((iy < ratio - 1)) count++;                                    // N neighbor
-      if ((ix < ratio - 1) && (iy < ratio - 1)) count++;                // NE neighbor
+      int const hasWest  = (ix > 1);
+      int const hasEast  = (ix < ratio - 1);
+      int const hasSouth = (iy > 1);
+      int const hasNorth = (iy < ratio - 1);
+
+      // South neighbors (iy - 1 row)
+      if (hasSouth) {
+        count += hasWest;   // SW
+        count++;            // S (always present when hasSouth)
+        count += hasEast;   // SE
+      }
+      // Center row neighbors
+      count += hasWest + hasEast;  // W and E
+      // North neighbors (iy + 1 row)
+      if (hasNorth) {
+        count += hasWest;   // NW
+        count++;            // N (always present when hasNorth)
+        count += hasEast;   // NE
+      }
 
       if (final) {
         matRowPtr_ii(iFree) = update;
@@ -218,7 +228,6 @@ struct MFEMAssemblyFunctor
       }
       update += count;
     });
-
     teamMember.team_barrier();
 
     // Now allocate colIdx and values for K_ii with the exact number of non-zeros
@@ -234,21 +243,28 @@ struct MFEMAssemblyFunctor
       int       offset  = matRowPtr_ii(iFree);
 
       // Add column indices for interior neighbors (in free DOF numbering)
-      if ((ix > 1) && (iy > 1)) {
-        int jGlobal = iGlobal - 1 - (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
-      }
+      // South neighbors (iy - 1 row)
       if (iy > 1) {
-        int jGlobal = iGlobal - (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        // SW neighbor
+        if (ix > 1) {
+          int jGlobal = iGlobal - 1 - (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
+        // S neighbor
+        {
+          int jGlobal = iGlobal - (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
+        // SE neighbor
+        if (ix < ratio - 1) {
+          int jGlobal = iGlobal + 1 - (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
       }
-      if ((ix < ratio - 1) && (iy > 1)) {
-        int jGlobal = iGlobal + 1 - (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
-      }
+      // W neighbor
       if (ix > 1) {
         int jGlobal = iGlobal - 1;
         int jFree   = globalToFree(jGlobal);
@@ -256,29 +272,34 @@ struct MFEMAssemblyFunctor
       }
       // Diagonal
       matColIdx_ii(offset++) = iFree;
+      // E neighbor
       if (ix < ratio - 1) {
         int jGlobal = iGlobal + 1;
         int jFree   = globalToFree(jGlobal);
         if (jFree != -1) matColIdx_ii(offset++) = jFree;
       }
-      if ((ix > 1) && (iy < ratio - 1)) {
-        int jGlobal = iGlobal - 1 + (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
-      }
+      // North neighbors (iy + 1 row)
       if (iy < ratio - 1) {
-        int jGlobal = iGlobal + (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
-      }
-      if ((ix < ratio - 1) && (iy < ratio - 1)) {
-        int jGlobal = iGlobal + 1 + (ratio + 1);
-        int jFree   = globalToFree(jGlobal);
-        if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        // NW neighbor
+        if (ix > 1) {
+          int jGlobal = iGlobal - 1 + (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
+        // N neighbor
+        {
+          int jGlobal = iGlobal + (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
+        // NE neighbor
+        if (ix < ratio - 1) {
+          int jGlobal = iGlobal + 1 + (ratio + 1);
+          int jFree   = globalToFree(jGlobal);
+          if (jFree != -1) matColIdx_ii(offset++) = jFree;
+        }
       }
     });
-
-    teamMember.team_barrier();
 
     // Initialize K_ii matrix values to zero
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_ii), [&](int i) {
@@ -299,10 +320,11 @@ struct MFEMAssemblyFunctor
 
       // Count all neighbors (interior and boundary) in global numbering
       int count = 1;  // Diagonal
-      if (ix > 0) count++;
-      if (ix < ratio) count++;
-      if (iy > 0) { count += 1 + (ix > 0) + (ix < ratio); }
-      if (iy < ratio) { count += 1 + (ix > 0) + (ix < ratio); }
+      int const hasWest = (ix > 0);
+      int const hasEast = (ix < ratio);
+      count += hasWest + hasEast;                          // W and E neighbors
+      if (iy > 0) { count += 1 + hasWest + hasEast; }     // S, SW, SE neighbors
+      if (iy < ratio) { count += 1 + hasWest + hasEast; } // N, NW, NE neighbors
 
       if (final) {
         matRowPtr_b(iBoundary) = update;
@@ -317,8 +339,6 @@ struct MFEMAssemblyFunctor
     int const         actualNnz_b = matRowPtr_b(numBoundaryDofs);
     scratch_int_1d    matColIdx_b(teamMember.team_scratch(1), actualNnz_b);
     scratch_double_1d matValues_b(teamMember.team_scratch(1), actualNnz_b);
-
-    teamMember.team_barrier();
 
     // Build column indices for K_b sparsity pattern (in global node numbering)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numBoundaryDofs), [&](int iBoundary) {
@@ -342,7 +362,6 @@ struct MFEMAssemblyFunctor
         if (ix < ratio) matColIdx_b(offset++) = iGlobal + 1 + (ratio + 1);
       }
     });
-
     teamMember.team_barrier();
 
     // Initialize K_b matrix values to zero
@@ -454,8 +473,6 @@ struct MFEMAssemblyFunctor
 
     teamMember.team_barrier();
 
-    //  Get the Dirichlet traces
-    //  Extract the unconstrained matrix
     //  Solve the linear system
     //  Compute Phi^T K Phi
     //  Compute Phi^T rhs
