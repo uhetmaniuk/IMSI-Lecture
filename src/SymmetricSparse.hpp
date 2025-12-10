@@ -2,6 +2,7 @@
 
 #include <complex>
 #include <iostream>
+#include <iomanip>
 #include <set>
 #include <vector>
 
@@ -371,8 +372,9 @@ SymmetricSparse<Scalar>::numericalFactorization(int*& SNODE, int*& IWORK, int& I
   int TMPSIZ, RWSIZE;
 
   int NLNZ = d_Factor->d_XLNZ[this->d_numRow];
-  //  std::cout << "number of nonzeros in LU factorization = " << NLNZ << std::endl;
-  //  std::cout << "NLNZ = " << NLNZ << std::endl;
+  std::cout << "  Factorization fill-in: nnz(L) = " << NLNZ
+            << " (fill ratio: " << std::setprecision(2)
+            << (double)NLNZ/this->d_NNZ << "x)" << std::endl;
   d_Factor->d_LNZ = new Scalar[NLNZ];
   for (int i = 0; i < NLNZ; i++) { d_Factor->d_LNZ[i] = 0; }
   for (int i = 0; i < this->d_numRow; i++) { d_Factor->d_DEF[i] = 0; }

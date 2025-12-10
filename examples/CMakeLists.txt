@@ -21,6 +21,24 @@ else()
 endif()
 
 #
+# Example comparing different sparse linear solvers
+#
+add_executable(
+        Solver_Comparison.exe
+        Solver_Comparison.cpp
+)
+
+target_include_directories(Solver_Comparison.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos
+)
+
+target_link_libraries(Solver_Comparison.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos ${EXTRALIB}
+)
+
+#
 # Example for testing SIMD acceleration
 #
 add_executable(

@@ -499,7 +499,7 @@ template <typename FuncX, typename FuncY, typename FuncF>
 class ScaledLaplacianCuda
 {
  public:
-  using CudaSpace = Kokkos::Cuda;
+  using ExecutionSpace = Kokkos::Cuda;
   using HostSpace = Kokkos::DefaultHostExecutionSpace;
 
   ScaledLaplacianCuda(
@@ -517,10 +517,10 @@ class ScaledLaplacianCuda
     getQuadrature(ruleType, sdim, ruleOrder, ruleLength, weight, xi, eta, zeta);
 
     // Copy quadrature data to device
-    quadWeight_d = Kokkos::View<double*, CudaSpace>("quadWeight", ruleLength);
-    quadXi_d     = Kokkos::View<double*, CudaSpace>("quadXi", ruleLength);
-    quadEta_d    = Kokkos::View<double*, CudaSpace>("quadEta", ruleLength);
-    quadZeta_d   = Kokkos::View<double*, CudaSpace>("quadZeta", ruleLength);
+    quadWeight_d = Kokkos::View<double*, ExecutionSpace>("quadWeight", ruleLength);
+    quadXi_d     = Kokkos::View<double*, ExecutionSpace>("quadXi", ruleLength);
+    quadEta_d    = Kokkos::View<double*, ExecutionSpace>("quadEta", ruleLength);
+    quadZeta_d   = Kokkos::View<double*, ExecutionSpace>("quadZeta", ruleLength);
 
     auto quadWeight_h = Kokkos::create_mirror_view(quadWeight_d);
     auto quadXi_h     = Kokkos::create_mirror_view(quadXi_d);
@@ -550,17 +550,17 @@ class ScaledLaplacianCuda
   /// Uses graph coloring to enable conflict-free parallel assembly on GPU
   void
   GetLinearSystem(
-      Kokkos::View<double*, CudaSpace> rhs,
-      Kokkos::View<size_t*, CudaSpace> matRowPtr,
-      Kokkos::View<int*, CudaSpace>    matColIdx,
-      Kokkos::View<double*, CudaSpace> matValues);
+      Kokkos::View<double*, ExecutionSpace> rhs,
+      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+      Kokkos::View<int*, ExecutionSpace>    matColIdx,
+      Kokkos::View<double*, ExecutionSpace> matValues);
 
   void
   GetLinearSystemMFEM(
-      Kokkos::View<double*, CudaSpace> rhs,
-      Kokkos::View<size_t*, CudaSpace> matRowPtr,
-      Kokkos::View<int*, CudaSpace>    matColIdx,
-      Kokkos::View<double*, CudaSpace> matValues);
+      Kokkos::View<double*, ExecutionSpace> rhs,
+      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+      Kokkos::View<int*, ExecutionSpace>    matColIdx,
+      Kokkos::View<double*, ExecutionSpace> matValues);
 
   int const ratio = 32;  // For MFEM_L fine mesh refinement
 
@@ -593,10 +593,10 @@ class ScaledLaplacianCuda
   std::vector<double> xi, eta, zeta;
 
   // Device copies of quadrature data
-  Kokkos::View<double*, CudaSpace> quadWeight_d;
-  Kokkos::View<double*, CudaSpace> quadXi_d;
-  Kokkos::View<double*, CudaSpace> quadEta_d;
-  Kokkos::View<double*, CudaSpace> quadZeta_d;
+  Kokkos::View<double*, ExecutionSpace> quadWeight_d;
+  Kokkos::View<double*, ExecutionSpace> quadXi_d;
+  Kokkos::View<double*, ExecutionSpace> quadEta_d;
+  Kokkos::View<double*, ExecutionSpace> quadZeta_d;
 
  protected:
   /// \brief Host-side Q1 element assembly for MFEM fine elements
@@ -979,10 +979,10 @@ class ScaledLaplacianCuda
 template <typename FuncX, typename FuncY, typename FuncF>
 void
 ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
-    Kokkos::View<double*, CudaSpace> rhs,
-    Kokkos::View<size_t*, CudaSpace> matRowPtr,
-    Kokkos::View<int*, CudaSpace>    matColIdx,
-    Kokkos::View<double*, CudaSpace> matValues)
+    Kokkos::View<double*, ExecutionSpace> rhs,
+    Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+    Kokkos::View<int*, ExecutionSpace>    matColIdx,
+    Kokkos::View<double*, ExecutionSpace> matValues)
 {
   // Get mesh info
   auto const& c2e  = meshInfo.c2e;
@@ -1000,7 +1000,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
   int const numNodes = meshInfo.mesh.NumberVertices();
 
   // Create device views for mesh data
-  Kokkos::View<int*, CudaSpace> cellTypes_d("cellTypes", numCells);
+  Kokkos::View<int*, ExecutionSpace> cellTypes_d("cellTypes", numCells);
   {
     auto  cellTypes_h   = Kokkos::create_mirror_view(cellTypes_d);
     auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
@@ -1010,7 +1010,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
     Kokkos::deep_copy(cellTypes_d, cellTypes_h);
   }
 
-  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
+  Kokkos::View<double*, ExecutionSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
   {
     auto  nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
     auto& mesh_ref     = meshInfo.mesh;
@@ -1022,7 +1022,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
     Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
   }
 
-  Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+  Kokkos::View<int**, ExecutionSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
   {
     auto  cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
     auto& mesh_ref     = meshInfo.mesh;
@@ -1053,7 +1053,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
     printf("  Color %d: %d elements\n", ic, numEle);
 
     // Copy element list to device (eleList from rowConst is host-side!)
-    Kokkos::View<int*, CudaSpace> eleList_d("eleList", numEle);
+    Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
     {
       auto eleList_h = Kokkos::subview(c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
       Kokkos::deep_copy(eleList_d, eleList_h);
@@ -1067,7 +1067,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
 
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
-        "Q1Assembly_Color", Kokkos::RangePolicy<CudaSpace>(0, numEle), KOKKOS_LAMBDA(const int ik) {
+        "Q1Assembly_Color", Kokkos::RangePolicy<ExecutionSpace>(0, numEle), KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList_device(ik);
 
           // Only handle Q1 elements for now
@@ -1255,10 +1255,10 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
 template <typename FuncX, typename FuncY, typename FuncF>
 void
 ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
-    Kokkos::View<double*, CudaSpace> rhs,
-    Kokkos::View<size_t*, CudaSpace> matRowPtr,
-    Kokkos::View<int*, CudaSpace>    matColIdx,
-    Kokkos::View<double*, CudaSpace> matValues)
+    Kokkos::View<double*, ExecutionSpace> rhs,
+    Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+    Kokkos::View<int*, ExecutionSpace>    matColIdx,
+    Kokkos::View<double*, ExecutionSpace> matValues)
 {
   // Get mesh info
   auto const& c2e  = meshInfo.c2e;
@@ -1276,7 +1276,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   int const numNodes = meshInfo.mesh.NumberVertices();
 
   // Create device views for mesh data
-  Kokkos::View<int*, CudaSpace> cellTypes_d("cellTypes", numCells);
+  Kokkos::View<int*, ExecutionSpace> cellTypes_d("cellTypes", numCells);
   {
     auto  cellTypes_h   = Kokkos::create_mirror_view(cellTypes_d);
     auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
@@ -1286,7 +1286,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     Kokkos::deep_copy(cellTypes_d, cellTypes_h);
   }
 
-  Kokkos::View<double*, CudaSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
+  Kokkos::View<double*, ExecutionSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
   {
     auto  nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
     auto& mesh_ref     = meshInfo.mesh;
@@ -1298,7 +1298,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
   }
 
-  Kokkos::View<int**, CudaSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+  Kokkos::View<int**, ExecutionSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
   {
     auto  cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
     auto& mesh_ref     = meshInfo.mesh;
@@ -1329,7 +1329,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     printf("  Color %d: %d elements\n", ic, numEle);
 
     // Copy element list to device (eleList from rowConst is host-side!)
-    Kokkos::View<int*, CudaSpace> eleList_d("eleList", numEle);
+    Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
     {
       auto eleList_h = Kokkos::subview(c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
       Kokkos::deep_copy(eleList_d, eleList_h);
@@ -1342,7 +1342,7 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     auto eleList_device = eleList_d;
 
     // Calculate scratch memory requirements
-    using functor_t = MFEMAssemblyFunctor<CudaSpace, FuncX, FuncY, FuncF>;
+    using functor_t = MFEMAssemblyFunctor<ExecutionSpace, FuncX, FuncY, FuncF>;
     using scratch_int_1d    = typename functor_t::scratch_int_1d;
     using scratch_double_1d = typename functor_t::scratch_double_1d;
 
@@ -1383,11 +1383,11 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         scratch_double_1d::shmem_size(numFreeDofs * numVectors);     // utmp (solution vectors)
 
     // Create TeamPolicy with scratch memory
-    Kokkos::TeamPolicy<CudaSpace> team_policy(numEle, Kokkos::AUTO);
+    Kokkos::TeamPolicy<ExecutionSpace> team_policy(numEle, Kokkos::AUTO);
     team_policy = team_policy.set_scratch_size(1, Kokkos::PerTeam(scratch_size_level1));
 
     // Parallel assembly for this color (no conflicts within same color)
-    MFEMAssemblyFunctor<CudaSpace, FuncX, FuncY, FuncF> functor{
+    MFEMAssemblyFunctor<ExecutionSpace, FuncX, FuncY, FuncF> functor{
         eleList_device,
         cellTypes,
         nodeCoords,

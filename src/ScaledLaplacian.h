@@ -9,6 +9,8 @@
 #include "MeshUtils.h"
 #include "QuadratureRule.h"
 #include "SymmetricSparse.hpp"
+#include "PCG_Solver.h"
+#include "SSOR_Solver.h"
 #include "fe1DQ1.h"
 #include "fe1DQ2.h"
 #include "fe2DQ1.h"
@@ -512,30 +514,30 @@ mutable std::vector< std::vector<double> > phiMFEM;
     }
     //
     int const           numVectors = 4;
+    int const           numVectorsToSolve = 3;  // Solve only 3, get 4th from partition of unity
     phi.resize(numVectors * numNodes, 0);
+    // Set boundary conditions for first 3 basis functions only
     for (int iy = 0; iy <= ratio; ++iy) {
       int    ix              = 0;
       int    in              = ix + iy * (ratio + 1);
       Scalar eta             = Scalar(iy) / Scalar(ratio);
-      phi[in]                = Scalar(1) - eta;
-      phi[in + 3 * numNodes] = eta;
+      phi[in]                = Scalar(1) - eta;  // Basis 0: left edge
       //
       ix                     = ratio;
       in                     = ix + iy * (ratio + 1);
-      phi[in + numNodes]     = Scalar(1) - eta;
-      phi[in + 2 * numNodes] = eta;
+      phi[in + numNodes]     = Scalar(1) - eta;  // Basis 1: right edge
+      phi[in + 2 * numNodes] = eta;              // Basis 2: right edge
     }
     for (int ix = 0; ix <= ratio; ++ix) {
       int    iy          = 0;
       int    in          = ix + iy * (ratio + 1);
       Scalar xi          = Scalar(ix) / Scalar(ratio);
-      phi[in]            = Scalar(1) - xi;
-      phi[in + numNodes] = xi;
+      phi[in]            = Scalar(1) - xi;       // Basis 0: bottom edge
+      phi[in + numNodes] = xi;                   // Basis 1: bottom edge
       //
       iy                     = ratio;
       in                     = ix + iy * (ratio + 1);
-      phi[in + 3 * numNodes] = Scalar(1) - xi;
-      phi[in + 2 * numNodes] = xi;
+      phi[in + 2 * numNodes] = xi;               // Basis 2: top edge
     }
     //
     //--- Prepare the linear system without boundary conditions
@@ -571,29 +573,96 @@ mutable std::vector< std::vector<double> > phiMFEM;
       }
     }
     //
-    // Compute the basis functions
+    // Compute the basis functions (only for first 3 basis functions)
     //
-    std::vector<Scalar> btmp(numVectors * n, 0);
+    std::vector<Scalar> btmp(numVectorsToSolve * n, 0);
     SparseMatrix<Scalar> K(
         numNodes, numNodes, matColIdx.size(), matRowPtr.data(), matColIdx.data(), matValues.data());
-    std::vector<Scalar> Kphi(numVectors * numNodes);
+    std::vector<Scalar> Kphi(numVectorsToSolve * numNodes);
     {
-      K.Apply(numVectors, &(phi[0]), &Kphi[0]);
+      K.Apply(numVectorsToSolve, &(phi[0]), &Kphi[0]);
       for (int ii = 0; ii < n; ++ii) {
-        for (int ir = 0; ir < numVectors; ++ir) { btmp[ii + ir * n] = -Kphi[freeToGlobal[ii] + ir * numNodes]; }
+        for (int ir = 0; ir < numVectorsToSolve; ++ir) { btmp[ii + ir * n] = -Kphi[freeToGlobal[ii] + ir * numNodes]; }
       }
     }
     //
+    // Extract diagonal for iterative solvers
+    std::vector<Scalar> diagValues(n, 0);
+    for (int i = 0; i < n; ++i) {
+      for (int k = newRowPtr[i]; k < newRowPtr[i + 1]; ++k) {
+        if (newColIdx[k] == i) {
+          diagValues[i] = newValues[k];
+          break;
+        }
+      }
+    }
+    //
+    // Solve with Direct Solver (SymmetricSparse) - only for first 3 basis functions
     timer.reset();
     SymmetricSparse<Scalar> Ktmp(n, newNNZ, newRowPtr.data(), newColIdx.data(), newValues.data());
     Ktmp.factor();
-    printf(" --- Local stiffness facto %e \n", timer.seconds());
+    double time_direct_factor = timer.seconds();
+    printf(" --- [Direct Solver] Factorization: %e s", time_direct_factor);
     //
-    std::vector<Scalar> utmp(numVectors * n, 0);
-    Ktmp.Solve(numVectors, &btmp[0], &utmp[0]);
+    timer.reset();
+    std::vector<Scalar> utmp_direct(numVectorsToSolve * n, 0);
+    Ktmp.Solve(numVectorsToSolve, &btmp[0], &utmp_direct[0]);
+    double time_direct_solve = timer.seconds();
+    double time_direct_total = time_direct_factor + time_direct_solve;
+    printf(", Solve: %e s, Total: %e s\n", time_direct_solve, time_direct_total);
+    //
+    // Solve with PCG + SSOR preconditioning - only for first 3 basis functions
+    timer.reset();
+    std::vector<Scalar> utmp_pcg(numVectorsToSolve * n, 0);
+
+    // Initialize with Q1 shape functions (bilinear basis) for first 3 basis functions
+    // These satisfy boundary conditions and provide a good initial guess
+    for (int ii = 0; ii < n; ++ii) {
+      int const grow = freeToGlobal[ii];
+      int const ix = grow % (ratio + 1);
+      int const iy = grow / (ratio + 1);
+      // Parametric coordinates in [0,1]
+      Scalar const xi_param  = Scalar(ix) / Scalar(ratio);
+      Scalar const eta_param = Scalar(iy) / Scalar(ratio);
+      // Q1 basis functions: N0 = (1-xi)(1-eta), N1 = xi(1-eta), N2 = xi*eta
+      utmp_pcg[ii + 0 * n] = (Scalar(1) - xi_param) * (Scalar(1) - eta_param);  // Corner 0
+      utmp_pcg[ii + 1 * n] = xi_param * (Scalar(1) - eta_param);                 // Corner 1
+      utmp_pcg[ii + 2 * n] = xi_param * eta_param;                               // Corner 2
+    }
+
+    std::vector<Scalar> work(4 * n);  // Workspace for PCG
+    int total_iters = 0;
+    double omega = 1.0;  // SSOR relaxation parameter
+    int numSSORSweeps = 1;  // Number of SSOR sweeps per preconditioning step
+    for (int ir = 0; ir < numVectorsToSolve; ++ir) {
+      int iter = PCG_Solve_SSOR_Precond(
+          n, newRowPtr.data(), newColIdx.data(), newValues.data(),
+          diagValues.data(), &btmp[ir * n], &utmp_pcg[ir * n], work.data(),
+          omega, numSSORSweeps, 1e-12, 1000);
+      total_iters += (iter > 0) ? iter : 1000;
+    }
+    double time_pcg_ssor = timer.seconds();
+    printf(" --- [PCG+SSOR]      Total: %e s, Avg iterations: %.1f (omega=%.1f, sweeps=%d, solved %d/%d)\n",
+           time_pcg_ssor, total_iters / double(numVectorsToSolve), omega, numSSORSweeps,
+           numVectorsToSolve, numVectors);
+    printf(" --- [Comparison]    Speedup: %.2fx (Direct/PCG)\n",
+           time_direct_total / time_pcg_ssor);
+    //
+    // Use direct solver solution (can switch to PCG if desired)
+    std::vector<Scalar>& utmp = utmp_direct;
+    // Copy first 3 basis functions from solver
     for (int ii = 0; ii < n; ++ii) {
       int grow = freeToGlobal[ii];
-      for (int ir = 0; ir < numVectors; ++ir) { phi[grow + ir * numNodes] = utmp[ii + ir * n]; }
+      for (int ir = 0; ir < numVectorsToSolve; ++ir) {
+        phi[grow + ir * numNodes] = utmp[ii + ir * n];
+      }
+    }
+    // Compute 4th basis function using partition of unity: phi[3] = 1 - phi[0] - phi[1] - phi[2]
+    for (int ii = 0; ii < numNodes; ++ii) {
+      phi[ii + 3 * numNodes] = Scalar(1)
+                             - phi[ii + 0 * numNodes]
+                             - phi[ii + 1 * numNodes]
+                             - phi[ii + 2 * numNodes];
     }
     //
     for (int ir = 0; ir < numVectors; ++ir) {
