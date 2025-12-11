@@ -150,8 +150,8 @@ int main(int argc, char* argv[])
     AyFunctor ay_func;
     FFunctor f_func;
 
-    // Instantiate ScaledLaplacianCuda with functor types
-    auto scalarLap = ScaledLaplacianCuda<AxFunctor, AyFunctor, FFunctor>(
+    // Instantiate ScaledLaplacianCuda with ExecutionSpace and functor types
+    auto scalarLap = ScaledLaplacianCuda<Kokkos::Cuda, AxFunctor, AyFunctor, FFunctor>(
         meshConn, RuleType::Gauss, 2, ax_func, ay_func, f_func);
 
     Kokkos::Timer timer;

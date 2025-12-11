@@ -416,7 +416,7 @@ struct MFEMAssemblyFunctor
       double kFineEle[nNodesFine * nNodesFine];
 
       // Call element assembly (note: need to use template syntax for static member function)
-      ScaledLaplacianCuda<FuncX, FuncY, FuncF>::template ElementaryDataQ1<double>(
+      ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::template ElementaryDataQ1<double>(
           coords_fine,
           &quadWeight(0),
           &quadXi(0),
@@ -492,14 +492,14 @@ struct MFEMAssemblyFunctor
 /// Note: Q2, 1D, and 3D cases are not implemented (per user requirements)
 ///
 /// Template parameters:
+///   - ExecutionSpace: Kokkos execution space (e.g., Kokkos::Cuda, Kokkos::OpenMP)
 ///   - FuncX, FuncY, FuncF: Functor types for coefficients ax, ay, and f
 ///     Each must have operator()(double x, double y, double z) marked KOKKOS_INLINE_FUNCTION
 ///
-template <typename FuncX, typename FuncY, typename FuncF>
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 class ScaledLaplacianCuda
 {
  public:
-  using ExecutionSpace = Kokkos::Cuda;
   using HostSpace = Kokkos::DefaultHostExecutionSpace;
 
   ScaledLaplacianCuda(
@@ -976,9 +976,9 @@ class ScaledLaplacianCuda
 };
 
 /// Implementation of GetLinearSystem
-template <typename FuncX, typename FuncY, typename FuncF>
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
-ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
+ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     Kokkos::View<double*, ExecutionSpace> rhs,
     Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
     Kokkos::View<int*, ExecutionSpace>    matColIdx,
@@ -1251,10 +1251,10 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystem(
   */
 }
 
-/// Implementation of GetLinearSystem
-template <typename FuncX, typename FuncY, typename FuncF>
+/// Implementation of GetLinearSystemMFEM
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
-ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
+ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     Kokkos::View<double*, ExecutionSpace> rhs,
     Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
     Kokkos::View<int*, ExecutionSpace>    matColIdx,
@@ -1409,9 +1409,9 @@ ScaledLaplacianCuda<FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
 }
 
 /// Implementation of ProcessMFEMElements (host-side)
-template <typename FuncX, typename FuncY, typename FuncF>
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
-ScaledLaplacianCuda<FuncX, FuncY, FuncF>::ProcessMFEMElements(
+ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::ProcessMFEMElements(
     Kokkos::View<double*, HostSpace> rhs_h,
     Kokkos::View<size_t*, HostSpace> matRowPtr_h,
     Kokkos::View<int*, HostSpace>    matColIdx_h,
