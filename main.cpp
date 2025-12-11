@@ -35,39 +35,6 @@ main(int argc, char* argv[])
     //
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
-    {
-      /*
-      /// HACK
-      typedef Kokkos::TeamPolicy<accelerator_space>::member_type member_type;
-      // Launch a kernel
-      auto uhStart = std::chrono::high_resolution_clock::now();
-      Kokkos::parallel_for("Test RP", Kokkos::TeamPolicy<accelerator_space>(4, Kokkos::AUTO, 16),
-      KOKKOS_LAMBDA(member_type team_member) {
-        /// league_rank -> Colored element ID
-          /// team -> only 1 team
-          ///
-        printf(" lsize %d lrank %d tsize %d trank %d \n", team_member.league_size(), team_member.league_rank(),
-      team_member.team_size(), team_member.team_rank()); std::this_thread::sleep_for(std::chrono::seconds(3));
-        Kokkos::parallel_for (Kokkos::TeamThreadRange(team_member, 7),
-            KOKKOS_LAMBDA (const int& i)
-        {
-          printf(" TeamThreadRange -> %d \n", i);
-          std::this_thread::sleep_for(std::chrono::seconds(1));
-        });
-        Kokkos::parallel_for (Kokkos::TeamVectorRange(team_member, 11),
-            KOKKOS_LAMBDA (const int& i)
-        {
-          printf(" TeamVectorRange -> %d \n", i);
-          std::this_thread::sleep_for(std::chrono::seconds(2));
-        });
-      });
-      auto uhStop = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double> uhDT = uhStop - uhStart;
-      printf(" dt %e \n", uhDT.count());
-      */
-    }
-    //
-    ///
     IMSI::DomainParams dParams;
     dParams.numElePerDir[0] = 8; // 2048
     dParams.numElePerDir[1] = 8; // 2048

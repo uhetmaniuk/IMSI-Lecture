@@ -594,6 +594,7 @@ mutable std::vector< std::vector<double> > phiMFEM;
     }
     //
     // Solve with Direct Solver (SymmetricSparse) - only for first 3 basis functions
+    //
     timer.reset();
     SymmetricSparse<Scalar> Ktmp(n, newNNZ, newRowPtr.data(), newColIdx.data(), newValues.data());
     Ktmp.factor();
@@ -607,6 +608,7 @@ mutable std::vector< std::vector<double> > phiMFEM;
     double time_direct_total = time_direct_factor + time_direct_solve;
     printf(", Solve: %e s, Total: %e s\n", time_direct_solve, time_direct_total);
     //
+    /*
     // Solve with PCG + SSOR preconditioning - only for first 3 basis functions
     timer.reset();
     std::vector<Scalar> utmp_pcg(numVectorsToSolve * n, 0);
@@ -644,6 +646,7 @@ mutable std::vector< std::vector<double> > phiMFEM;
     printf(" --- [Comparison]    Speedup: %.2fx (Direct/PCG)\n",
            time_direct_total / time_pcg_ssor);
     //
+    */
     // Use direct solver solution (can switch to PCG if desired)
     std::vector<Scalar>& utmp = utmp_direct;
     // Copy first 3 basis functions from solver
@@ -666,8 +669,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
       for (int ii = 0; ii < numNodes; ++ii) { sum += phi[ii + ir * numNodes] * rhs[ii]; }
       rele[ir] = sum;
     }
-    //
-    {
       K.Apply(numVectors, &(phi[0]), &Kphi[0]);
       for (int ir = 0; ir < numVectors; ++ir) {
         for (int jr = 0; jr <= ir; ++jr) {
@@ -677,7 +678,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
           kele[jr + ir * numVectors] = sum;
         }
       }
-    }
   }
 };
 
