@@ -3,7 +3,7 @@
 #include <iostream>
 
 #include "FunctionExamples.h"
-#include "ScaledLaplacian.h"
+#include "ScaledLaplacianHost.h"
 
 namespace IMSI {
 

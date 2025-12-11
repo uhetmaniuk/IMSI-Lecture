@@ -12,7 +12,7 @@
 #include "src/FunctionExamples.h"
 #include "src/Mesh.h"
 #include "src/MeshUtils.h"
-#include "src/ScaledLaplacian.h"
+#include "src/ScaledLaplacianHost.h"
 #include "src/SymmetricSparse.hpp"
 #include "src/Utils.h"
 
@@ -36,10 +36,10 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 8; // 2048
-    dParams.numElePerDir[1] = 8; // 2048
+    dParams.numElePerDir[0] = 96; // 2048
+    dParams.numElePerDir[1] = 96; // 2048
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::Q1;
+    dParams.cellType        = IMSI::ElementType::MFEM_L;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
     if (dParams.cellType == IMSI::ElementType::MFEM_L) { std::cout << " MFEM_L (-Q1) discretization \n"; }
@@ -69,7 +69,7 @@ main(int argc, char* argv[])
     //
     const IMSI::ParabolicPb2 problem;
     start = std::chrono::high_resolution_clock::now();
-    IMSI::ScaledLaplacian dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
+    IMSI::ScaledLaplacianHost dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
     if (useColoring) {
       if ((useSIMD) && (dParams.cellType != IMSI::ElementType::MFEM_L)) {
         dataAssembly.GetLinearSystem_v<host_execution_space, true>(rhsValues, matRowPtr, matColIdx, matValues);

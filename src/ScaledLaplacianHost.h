@@ -7,10 +7,10 @@
 #include "Element.h"
 #include "MathUtils.h"
 #include "MeshUtils.h"
-#include "QuadratureRule.h"
-#include "SymmetricSparse.hpp"
 #include "PCG_Solver.h"
+#include "QuadratureRule.h"
 #include "SSOR_Solver.h"
+#include "SymmetricSparse.hpp"
 #include "fe1DQ1.h"
 #include "fe1DQ2.h"
 #include "fe2DQ1.h"
@@ -20,10 +20,10 @@
 
 namespace IMSI {
 
-class ScaledLaplacian
+class ScaledLaplacianHost
 {
  public:
-  ScaledLaplacian(
+  ScaledLaplacianHost(
       const MeshConnectivity<>&                     meshData,
       std::function<double(double, double, double)> alpha_x,
       std::function<double(double, double, double)> beta_y,
@@ -58,28 +58,30 @@ class ScaledLaplacian
       Kokkos::View<int*, Device>    matColIdx,
       Kokkos::View<double*, Device> matValues) const;
 
-mutable std::vector< std::vector<double> > phiMFEM;
-  int const ratio            = 32;
+  mutable std::vector<std::vector<double>> phiMFEM;
+  int const                                ratio = 32;
 
-  void OutputMFEMFine(double* uCoarse, int numEleX, int numEleY) const {
+  void
+  OutputMFEMFine(double* uCoarse, int numEleX, int numEleY) const
+  {
     //
-    int numFineEleX = ratio * numEleX;
-    int numFineEleY = ratio * numEleY;
-    int numFineNodes = (numFineEleX + 1) * (numFineEleY + 1);
+    int                 numFineEleX  = ratio * numEleX;
+    int                 numFineEleY  = ratio * numEleY;
+    int                 numFineNodes = (numFineEleX + 1) * (numFineEleY + 1);
     std::vector<double> uFine(numFineNodes, 0);
     std::vector<double> uTrace(4);
     //
     for (int iy = 0; iy < numEleY; ++iy) {
       for (int ix = 0; ix < numEleX; ++ix) {
-        int eleID = ix + iy * numEleX;
-        auto const& phi = phiMFEM[eleID];
-        uTrace[0] = uCoarse[ix + iy * (numEleX + 1)];
-        uTrace[1] = uCoarse[ix + 1 + iy * (numEleX + 1)];
-        uTrace[2] = uCoarse[ix + 1 + (iy + 1) * (numEleX + 1)];
-        uTrace[3] = uCoarse[ix + (iy + 1) * (numEleX + 1)];
+        int         eleID = ix + iy * numEleX;
+        auto const& phi   = phiMFEM[eleID];
+        uTrace[0]         = uCoarse[ix + iy * (numEleX + 1)];
+        uTrace[1]         = uCoarse[ix + 1 + iy * (numEleX + 1)];
+        uTrace[2]         = uCoarse[ix + 1 + (iy + 1) * (numEleX + 1)];
+        uTrace[3]         = uCoarse[ix + (iy + 1) * (numEleX + 1)];
         for (int jy = 0; jy <= ratio; ++jy) {
           for (int jx = 0; jx <= ratio; ++jx) {
-            int nodeID = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
+            int nodeID    = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
             uFine[nodeID] = 0;
             for (int k = 0; k < 4; ++k) {
               uFine[nodeID] += phi[jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1)] * uTrace[k];
@@ -121,7 +123,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
     x.copy_to(&xa[0], Kokkos::Experimental::element_aligned_tag());
     y.copy_to(&ya[0], Kokkos::Experimental::element_aligned_tag());
     z.copy_to(&za[0], Kokkos::Experimental::element_aligned_tag());
-    for (int i = 0; i < simd_type::size(); ++i) { ga[i] = g(xa[i], ya[i], za[i]); }
+    for (int i = 0; i < simd_type::size(); ++i) {
+      ga[i] = g(xa[i], ya[i], za[i]);
+    }
     val.copy_from(&ga[0], Kokkos::Experimental::element_aligned_tag());
     return val;
   }
@@ -154,12 +158,18 @@ mutable std::vector< std::vector<double> > phiMFEM;
     auto const xq = pointJac[0];
     auto const yq = (dim > 1) ? pointJac[1] : Scalar(0);
     auto const zq = (dim > 2) ? pointJac[2] : Scalar(0);
-    if (ax.has_value()) { alpha[0] = ax->operator()(xq, yq, zq); }
+    if (ax.has_value()) {
+      alpha[0] = ax->operator()(xq, yq, zq);
+    }
     if constexpr (dim > 1) {
-      if (ay.has_value()) { alpha[1] = ay->operator()(xq, yq, zq); }
+      if (ay.has_value()) {
+        alpha[1] = ay->operator()(xq, yq, zq);
+      }
     }
     if constexpr (dim > 2) {
-      if (az.has_value()) { alpha[2] = az->operator()(xq, yq, zq); }
+      if (az.has_value()) {
+        alpha[2] = az->operator()(xq, yq, zq);
+      }
     }
     //
     // Get the inverse of the Jacobian
@@ -172,7 +182,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
     GradPhi.fill(Scalar(0));
     for (int jn = 0; jn < nNodes; ++jn) {
       for (int in = 0; in < dim; ++in) {
-        for (int kn = 0; kn < dim; ++kn) { GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes]; }
+        for (int kn = 0; kn < dim; ++kn) {
+          GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes];
+        }
       }
     }
     //
@@ -185,8 +197,12 @@ mutable std::vector< std::vector<double> > phiMFEM;
     }
     //
     Scalar fq(0);
-    if (f.has_value()) { fq = f->operator()(xq, yq, zq); }
-    for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * w * detJ; }
+    if (f.has_value()) {
+      fq = f->operator()(xq, yq, zq);
+    }
+    for (int in = 0; in < nNodes; ++in) {
+      rele[in] += fq * NandGradN[in] * w * detJ;
+    }
   }
 
   template <int dim, int nNodes, typename ElementClass>
@@ -216,12 +232,18 @@ mutable std::vector< std::vector<double> > phiMFEM;
       auto const xq = pointJac[0];
       auto const yq = (dim > 1) ? pointJac[1] : double(0.0);
       auto const zq = (dim > 2) ? pointJac[2] : double(0.0);
-      if (ax.has_value()) { alpha[0] = ax->operator()(xq, yq, zq); }
+      if (ax.has_value()) {
+        alpha[0] = ax->operator()(xq, yq, zq);
+      }
       if constexpr (dim > 1) {
-        if (ay.has_value()) { alpha[1] = ay->operator()(xq, yq, zq); }
+        if (ay.has_value()) {
+          alpha[1] = ay->operator()(xq, yq, zq);
+        }
       }
       if constexpr (dim > 2) {
-        if (az.has_value()) { alpha[2] = az->operator()(xq, yq, zq); }
+        if (az.has_value()) {
+          alpha[2] = az->operator()(xq, yq, zq);
+        }
       }
       //
       // Get the inverse of the Jacobian
@@ -234,7 +256,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
       GradPhi.fill(0);
       for (int jn = 0; jn < nNodes; ++jn) {
         for (int in = 0; in < dim; ++in) {
-          for (int kn = 0; kn < dim; ++kn) { GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes]; }
+          for (int kn = 0; kn < dim; ++kn) {
+            GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes];
+          }
         }
       }
       //
@@ -247,12 +271,18 @@ mutable std::vector< std::vector<double> > phiMFEM;
       }
       //
       double fq = 0.0;
-      if (f.has_value()) { fq = f->operator()(xq, yq, zq); }
-      for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * weight[iq] * detJ; }
+      if (f.has_value()) {
+        fq = f->operator()(xq, yq, zq);
+      }
+      for (int in = 0; in < nNodes; ++in) {
+        rele[in] += fq * NandGradN[in] * weight[iq] * detJ;
+      }
     }
     // Symmetrize the matrix once after all quadrature points
     for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
+      for (int in = jn + 1; in < nNodes; ++in) {
+        kele[in + jn * nNodes] = kele[jn + in * nNodes];
+      }
     }
   }
 
@@ -281,7 +311,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
       for (int jd = 0; jd <= dim; ++jd) {
         for (int id = 0; id < dim; ++id) {
           Scalar jacEntry{0};
-          for (int kn = 0; kn < nNodes; ++kn) { jacEntry += NandGradN[kn + jd * nNodes] * coords_v[id + kn * dim]; }
+          for (int kn = 0; kn < nNodes; ++kn) {
+            jacEntry += NandGradN[kn + jd * nNodes] * coords_v[id + kn * dim];
+          }
           pointJac[id + jd * dim] = jacEntry;
         }
       }
@@ -324,7 +356,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
       for (int jn = 0; jn < nNodes; ++jn) {
         for (int in = 0; in < dim; ++in) {
           Scalar tmpGrad{0};
-          for (int kn = 0; kn < dim; ++kn) { tmpGrad += J[in + kn * dim] * GradN[jn + kn * nNodes]; }
+          for (int kn = 0; kn < dim; ++kn) {
+            tmpGrad += J[in + kn * dim] * GradN[jn + kn * nNodes];
+          }
           GradPhi[in + jn * dim] = tmpGrad;
         }
       }
@@ -334,7 +368,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
       for (int jn = 0; jn < nNodes; ++jn) {
         for (int in = 0; in <= jn; ++in) {
           Scalar sum(0);
-          for (int kn = 0; kn < dim; ++kn) { sum += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim]; }
+          for (int kn = 0; kn < dim; ++kn) {
+            sum += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim];
+          }
           kele[in + jn * nNodes] += sum * coeff;
         }
       }
@@ -346,19 +382,27 @@ mutable std::vector< std::vector<double> > phiMFEM;
         } else {
           fq = f->operator()(xq, yq, zq);
         }
-        for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * coeff; }
+        for (int in = 0; in < nNodes; ++in) {
+          rele[in] += fq * NandGradN[in] * coeff;
+        }
       }
     }
     // Symmetrize the matrix once after all quadrature points
     for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
+      for (int in = jn + 1; in < nNodes; ++in) {
+        kele[in + jn * nNodes] = kele[jn + in * nNodes];
+      }
     }
   }
 
   template <typename Scalar, typename ElementClass>
   void
-  ElementaryDataMFEM_t(ElementClass& element, const Scalar* coords_v, Scalar* rele, Scalar* kele,
-    std::vector<Scalar>& phi) const
+  ElementaryDataMFEM_t(
+      ElementClass&        element,
+      const Scalar*        coords_v,
+      Scalar*              rele,
+      Scalar*              kele,
+      std::vector<Scalar>& phi) const
   {
     /// TODO Generalize these parameters
     size_t    maxNumDofsPerEle = 4;
@@ -381,17 +425,29 @@ mutable std::vector< std::vector<double> > phiMFEM;
       for (int ix = 0; ix <= ratio; ++ix) {
         int const nodeID = ix + iy * (ratio + 1);
         if (iy > 0) {
-          if (ix > 0) { matColIdx.push_back(nodeID - 1 - (ratio + 1)); }
+          if (ix > 0) {
+            matColIdx.push_back(nodeID - 1 - (ratio + 1));
+          }
           matColIdx.push_back(nodeID - (ratio + 1));
-          if (ix < ratio) { matColIdx.push_back(nodeID + 1 - (ratio + 1)); }
+          if (ix < ratio) {
+            matColIdx.push_back(nodeID + 1 - (ratio + 1));
+          }
         }
-        if (ix > 0) { matColIdx.push_back(nodeID - 1); }
+        if (ix > 0) {
+          matColIdx.push_back(nodeID - 1);
+        }
         matColIdx.push_back(nodeID);
-        if (ix < ratio) { matColIdx.push_back(nodeID + 1); }
+        if (ix < ratio) {
+          matColIdx.push_back(nodeID + 1);
+        }
         if (iy < ratio) {
-          if (ix > 0) { matColIdx.push_back(nodeID - 1 + (ratio + 1)); }
+          if (ix > 0) {
+            matColIdx.push_back(nodeID - 1 + (ratio + 1));
+          }
           matColIdx.push_back(nodeID + (ratio + 1));
-          if (ix < ratio) { matColIdx.push_back(nodeID + 1 + (ratio + 1)); }
+          if (ix < ratio) {
+            matColIdx.push_back(nodeID + 1 + (ratio + 1));
+          }
         }
         matRowPtr[nodeID + 1] = matColIdx.size();
       }
@@ -430,8 +486,10 @@ mutable std::vector< std::vector<double> > phiMFEM;
           coords_simd[d].copy_from(tmp_coords.data(), Kokkos::Experimental::element_aligned_tag());
         }
 
-        for (auto& val : rFineEle_simd) val = 0;
-        for (auto& val : kFineEle_simd) val = 0;
+        for (auto& val : rFineEle_simd)
+          val = 0;
+        for (auto& val : kFineEle_simd)
+          val = 0;
 
         this->ElementaryDataLagrangeFE_t<simd_t>(element, &coords_simd[0], &rFineEle_simd[0], &kFineEle_simd[0]);
 
@@ -448,7 +506,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
               iix + 1 + (iy + 1) * (ratio + 1),
               iix + (iy + 1) * (ratio + 1)};
           //
-          for (int in = 0; in < size(nodeList); ++in) { rhs[nodeList[in]] += rFineEle_v[in * width + k]; }
+          for (int in = 0; in < size(nodeList); ++in) {
+            rhs[nodeList[in]] += rFineEle_v[in * width + k];
+          }
           //
           for (int in = 0; in < size(nodeList); ++in) {
             auto const irow     = nodeList[in];
@@ -479,7 +539,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
         std::fill(kFineEle.begin(), kFineEle.end(), 0);
         this->ElementaryDataLagrangeFE_t<Scalar>(element, &coords[0], &rFineEle[0], &kFineEle[0]);
         //
-        for (int in = 0; in < size(nodeList); ++in) { rhs[nodeList[in]] += rFineEle[in]; }
+        for (int in = 0; in < size(nodeList); ++in) {
+          rhs[nodeList[in]] += rFineEle[in];
+        }
         //
         for (int in = 0; in < size(nodeList); ++in) {
           auto const irow     = nodeList[in];
@@ -501,7 +563,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
     int              localCount = 0;
     for (int iy = 0; iy <= ratio; ++iy) {
       for (int ix = 0; ix <= ratio; ++ix) {
-        if ((ix == 0) || (ix == ratio) || (iy == 0) || (iy == ratio)) { continue; }
+        if ((ix == 0) || (ix == ratio) || (iy == 0) || (iy == ratio)) {
+          continue;
+        }
         int const nodeID         = ix + iy * (ratio + 1);
         globalToFree[nodeID]     = localCount;
         freeToGlobal[localCount] = nodeID;
@@ -509,15 +573,15 @@ mutable std::vector< std::vector<double> > phiMFEM;
       }
     }
     //
-    int const           numVectors = 4;
-    int const           numVectorsToSolve = 3;  // Solve only 3, get 4th from partition of unity
+    int const numVectors        = 4;
+    int const numVectorsToSolve = 3;  // Solve only 3, get 4th from partition of unity
     phi.resize(numVectors * numNodes, 0);
     // Set boundary conditions for first 3 basis functions only
     for (int iy = 0; iy <= ratio; ++iy) {
-      int    ix              = 0;
-      int    in              = ix + iy * (ratio + 1);
-      Scalar eta             = Scalar(iy) / Scalar(ratio);
-      phi[in]                = Scalar(1) - eta;  // Basis 0: left edge
+      int    ix  = 0;
+      int    in  = ix + iy * (ratio + 1);
+      Scalar eta = Scalar(iy) / Scalar(ratio);
+      phi[in]    = Scalar(1) - eta;  // Basis 0: left edge
       //
       ix                     = ratio;
       in                     = ix + iy * (ratio + 1);
@@ -528,12 +592,12 @@ mutable std::vector< std::vector<double> > phiMFEM;
       int    iy          = 0;
       int    in          = ix + iy * (ratio + 1);
       Scalar xi          = Scalar(ix) / Scalar(ratio);
-      phi[in]            = Scalar(1) - xi;       // Basis 0: bottom edge
-      phi[in + numNodes] = xi;                   // Basis 1: bottom edge
+      phi[in]            = Scalar(1) - xi;  // Basis 0: bottom edge
+      phi[in + numNodes] = xi;              // Basis 1: bottom edge
       //
       iy                     = ratio;
       in                     = ix + iy * (ratio + 1);
-      phi[in + 2 * numNodes] = xi;               // Basis 2: top edge
+      phi[in + 2 * numNodes] = xi;  // Basis 2: top edge
     }
     //
     //--- Prepare the linear system without boundary conditions
@@ -545,12 +609,16 @@ mutable std::vector< std::vector<double> > phiMFEM;
     for (int i = 0; i < n; ++i) {
       auto gDof   = freeToGlobal[i];
       int  iCount = 0;
-      for (auto k = matRowPtr[gDof]; k < matRowPtr[gDof + 1]; ++k) { iCount += (globalToFree[matColIdx[k]] != -1); }
+      for (auto k = matRowPtr[gDof]; k < matRowPtr[gDof + 1]; ++k) {
+        iCount += (globalToFree[matColIdx[k]] != -1);
+      }
       newRowPtr[i + 1] = iCount;
       count += iCount;
     }
     //
-    for (int i = 0; i < newRowPtr.size() - 1; ++i) { newRowPtr[i + 1] += newRowPtr[i]; }
+    for (int i = 0; i < newRowPtr.size() - 1; ++i) {
+      newRowPtr[i + 1] += newRowPtr[i];
+    }
     auto const newNNZ = newRowPtr[n];
     //
     std::vector<int>    newColIdx(newNNZ);
@@ -570,15 +638,18 @@ mutable std::vector< std::vector<double> > phiMFEM;
     }
     //
     // Compute the basis functions (only for first 3 basis functions)
+    // Optimized: only compute rows corresponding to free DOFs
     //
     std::vector<Scalar> btmp(numVectorsToSolve * n, 0);
-    SparseMatrix<Scalar> K(
-        numNodes, numNodes, matColIdx.size(), matRowPtr.data(), matColIdx.data(), matValues.data());
-    std::vector<Scalar> Kphi(numVectorsToSolve * numNodes);
-    {
-      K.Apply(numVectorsToSolve, &(phi[0]), &Kphi[0]);
-      for (int ii = 0; ii < n; ++ii) {
-        for (int ir = 0; ir < numVectorsToSolve; ++ir) { btmp[ii + ir * n] = -Kphi[freeToGlobal[ii] + ir * numNodes]; }
+    for (int ii = 0; ii < n; ++ii) {
+      int globalRow = freeToGlobal[ii];
+      for (int ir = 0; ir < numVectorsToSolve; ++ir) {
+        Scalar sum = 0;
+        for (int k = matRowPtr[globalRow]; k < matRowPtr[globalRow + 1]; ++k) {
+          int col = matColIdx[k];
+          sum += matValues[k] * phi[col + ir * numNodes];
+        }
+        btmp[ii + ir * n] = -sum;
       }
     }
     //
@@ -608,11 +679,9 @@ mutable std::vector< std::vector<double> > phiMFEM;
     double time_direct_total = time_direct_factor + time_direct_solve;
     printf(", Solve: %e s, Total: %e s\n", time_direct_solve, time_direct_total);
     //
-    /*
     // Solve with PCG + SSOR preconditioning - only for first 3 basis functions
     timer.reset();
     std::vector<Scalar> utmp_pcg(numVectorsToSolve * n, 0);
-
     // Initialize with Q1 shape functions (bilinear basis) for first 3 basis functions
     // These satisfy boundary conditions and provide a good initial guess
     for (int ii = 0; ii < n; ++ii) {
@@ -627,7 +696,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
       utmp_pcg[ii + 1 * n] = xi_param * (Scalar(1) - eta_param);                 // Corner 1
       utmp_pcg[ii + 2 * n] = xi_param * eta_param;                               // Corner 2
     }
-
     std::vector<Scalar> work(4 * n);  // Workspace for PCG
     int total_iters = 0;
     double omega = 1.0;  // SSOR relaxation parameter
@@ -646,7 +714,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
     printf(" --- [Comparison]    Speedup: %.2fx (Direct/PCG)\n",
            time_direct_total / time_pcg_ssor);
     //
-    */
     // Use direct solver solution (can switch to PCG if desired)
     std::vector<Scalar>& utmp = utmp_direct;
     // Copy first 3 basis functions from solver
@@ -658,26 +725,34 @@ mutable std::vector< std::vector<double> > phiMFEM;
     }
     // Compute 4th basis function using partition of unity: phi[3] = 1 - phi[0] - phi[1] - phi[2]
     for (int ii = 0; ii < numNodes; ++ii) {
-      phi[ii + 3 * numNodes] = Scalar(1)
-                             - phi[ii + 0 * numNodes]
-                             - phi[ii + 1 * numNodes]
-                             - phi[ii + 2 * numNodes];
+      phi[ii + 3 * numNodes] = Scalar(1) - phi[ii + 0 * numNodes] - phi[ii + 1 * numNodes] - phi[ii + 2 * numNodes];
     }
     //
     for (int ir = 0; ir < numVectors; ++ir) {
       Scalar sum = 0;
-      for (int ii = 0; ii < numNodes; ++ii) { sum += phi[ii + ir * numNodes] * rhs[ii]; }
+      for (int ii = 0; ii < numNodes; ++ii) {
+        sum += phi[ii + ir * numNodes] * rhs[ii];
+      }
       rele[ir] = sum;
     }
+    //
+    // Compute element stiffness matrix: kele[ir,jr] = phi[:,ir]^T * K * phi[:,jr]
+    // Here we need the full matrix-vector product over all nodes
+    {
+      SparseMatrix<Scalar> K(numNodes, numNodes, matColIdx.size(), matRowPtr.data(), matColIdx.data(), matValues.data());
+      std::vector<Scalar>  Kphi(numVectors * numNodes);
       K.Apply(numVectors, &(phi[0]), &Kphi[0]);
       for (int ir = 0; ir < numVectors; ++ir) {
         for (int jr = 0; jr <= ir; ++jr) {
           Scalar sum = 0;
-          for (int ii = 0; ii < numNodes; ++ii) { sum += phi[ii + ir * numNodes] * Kphi[ii + jr * numNodes]; }
+          for (int ii = 0; ii < numNodes; ++ii) {
+            sum += phi[ii + ir * numNodes] * Kphi[ii + jr * numNodes];
+          }
           kele[ir + jr * numVectors] = sum;
           kele[jr + ir * numVectors] = sum;
         }
       }
+    }
   }
 };
 
@@ -691,7 +766,7 @@ namespace IMSI {
 
 template <typename Device>
 void
-ScaledLaplacian::GetLinearSystem(
+ScaledLaplacianHost::GetLinearSystem(
     Kokkos::View<double*, Device> rhs,
     Kokkos::View<size_t*, Device> matRowPtr,
     Kokkos::View<int*, Device>    matColIdx,
@@ -750,10 +825,20 @@ ScaledLaplacian::GetLinearSystem(
                   // Debug: Print first element RHS (CPU version)
                   if (eleID == 0 && ic == 0) {
                     double f_val = (f.has_value()) ? f.value()(0.5, 0.5, 0.0) : 0.0;
-                    printf("CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
-                           eleID, f_val, rele[0], rele[1], rele[2], rele[3]);
-                    printf("CPU nodeList=[%d,%d,%d,%d]\n",
-                           (int)nodeList[0], (int)nodeList[1], (int)nodeList[2], (int)nodeList[3]);
+                    printf(
+                        "CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
+                        eleID,
+                        f_val,
+                        rele[0],
+                        rele[1],
+                        rele[2],
+                        rele[3]);
+                    printf(
+                        "CPU nodeList=[%d,%d,%d,%d]\n",
+                        (int)nodeList[0],
+                        (int)nodeList[1],
+                        (int)nodeList[2],
+                        (int)nodeList[3]);
                   }
 
                   break;
@@ -818,7 +903,9 @@ ScaledLaplacian::GetLinearSystem(
             }  // case ElementType::MFEM_L:
           }
           //
-          for (int in = 0; in < size(nodeList); ++in) { rhs(nodeList[in]) += rele[in]; }
+          for (int in = 0; in < size(nodeList); ++in) {
+            rhs(nodeList[in]) += rele[in];
+          }
           //
           for (int in = 0; in < size(nodeList); ++in) {
             auto const irow     = nodeList[in];
@@ -836,7 +923,7 @@ ScaledLaplacian::GetLinearSystem(
 
 template <typename Device, bool useSIMD, bool useColoring>
 void
-ScaledLaplacian::GetLinearSystem_v(
+ScaledLaplacianHost::GetLinearSystem_v(
     Kokkos::View<double*, Device> rhs,
     Kokkos::View<size_t*, Device> matRowPtr,
     Kokkos::View<int*, Device>    matColIdx,
@@ -870,21 +957,24 @@ ScaledLaplacian::GetLinearSystem_v(
     auto const                  offSetLen = (vecSize == 1) ? numEle : numEle % vecSize;
     Kokkos::parallel_for(
         "ScalarAssembly",
-        Kokkos::TeamPolicy<Device>(offSetLen, Kokkos::AUTO)
-          .set_scratch_size(0, Kokkos::PerThread(totalScratchSize)),
+        Kokkos::TeamPolicy<Device>(offSetLen, Kokkos::AUTO).set_scratch_size(0, Kokkos::PerThread(totalScratchSize)),
         KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
-          auto const          ik = team.league_rank();
+          auto const ik = team.league_rank();
 
           // Use scratch memory instead of heap allocation
           double* rele = (double*)team.thread_scratch(0).get_shmem(scratchSize_rele);
           double* kele = (double*)team.thread_scratch(0).get_shmem(scratchSize_kele);
 
-          auto const          eleID    = (useColoring) ? eleList(ik) : ik;
-          auto                nodeList = meshInfo.mesh.NodeList(eleID);
+          auto const eleID    = (useColoring) ? eleList(ik) : ik;
+          auto       nodeList = meshInfo.mesh.NodeList(eleID);
           //
           // Initialize scratch memory to zero
-          for (int i = 0; i < size(nodeList); ++i) { rele[i] = 0.0; }
-          for (int i = 0; i < size(nodeList) * size(nodeList); ++i) { kele[i] = 0.0; }
+          for (int i = 0; i < size(nodeList); ++i) {
+            rele[i] = 0.0;
+          }
+          for (int i = 0; i < size(nodeList) * size(nodeList); ++i) {
+            kele[i] = 0.0;
+          }
           //
           // Element type for eleID
           //
@@ -915,10 +1005,20 @@ ScaledLaplacian::GetLinearSystem_v(
                   // Debug: Print first element RHS (CPU version)
                   if (eleID == 0 && ic == 0) {
                     double f_val = (f.has_value()) ? f.value()(0.5, 0.5, 0.0) : 0.0;
-                    printf("CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
-                           eleID, f_val, rele[0], rele[1], rele[2], rele[3]);
-                    printf("CPU nodeList=[%d,%d,%d,%d]\n",
-                           (int)nodeList[0], (int)nodeList[1], (int)nodeList[2], (int)nodeList[3]);
+                    printf(
+                        "CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
+                        eleID,
+                        f_val,
+                        rele[0],
+                        rele[1],
+                        rele[2],
+                        rele[3]);
+                    printf(
+                        "CPU nodeList=[%d,%d,%d,%d]\n",
+                        (int)nodeList[0],
+                        (int)nodeList[1],
+                        (int)nodeList[2],
+                        (int)nodeList[3]);
                   }
 
                   break;
@@ -1017,25 +1117,25 @@ ScaledLaplacian::GetLinearSystem_v(
         });
     //
     // Calculate scratch memory size for SIMD element assembly
-    const size_t scratchSize_rele_v = maxNumDofsPerEle * sizeof(simd_type);
-    const size_t scratchSize_kele_v = maxNumDofsPerEle * maxNumDofsPerEle * sizeof(simd_type);
-    const size_t scratchSize_coords = sdim * vecSize * maxNumDofsPerEle * sizeof(double);
+    const size_t scratchSize_rele_v        = maxNumDofsPerEle * sizeof(simd_type);
+    const size_t scratchSize_kele_v        = maxNumDofsPerEle * maxNumDofsPerEle * sizeof(simd_type);
+    const size_t scratchSize_coords        = sdim * vecSize * maxNumDofsPerEle * sizeof(double);
     const size_t scratchSize_rele_unpacked = maxNumDofsPerEle * vecSize * sizeof(double);
     const size_t scratchSize_kele_unpacked = maxNumDofsPerEle * maxNumDofsPerEle * vecSize * sizeof(double);
-    const size_t totalScratchSize_SIMD = scratchSize_rele_v + scratchSize_kele_v + scratchSize_coords +
-                                          scratchSize_rele_unpacked + scratchSize_kele_unpacked;
+    const size_t totalScratchSize_SIMD     = scratchSize_rele_v + scratchSize_kele_v + scratchSize_coords +
+                                         scratchSize_rele_unpacked + scratchSize_kele_unpacked;
 
     Kokkos::parallel_for(
         "SIMDAssembly",
         Kokkos::TeamPolicy<Device>((numEle - offSetLen) / vecSize, Kokkos::AUTO)
-          .set_scratch_size(0, Kokkos::PerThread(totalScratchSize_SIMD)),
+            .set_scratch_size(0, Kokkos::PerThread(totalScratchSize_SIMD)),
         KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
           // Use scratch memory instead of heap allocation
-          simd_type* rele_v = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_rele_v);
-          simd_type* kele_v = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_kele_v);
-          double* coords = (double*)team.thread_scratch(0).get_shmem(scratchSize_coords);
-          double* rele_unpacked = (double*)team.thread_scratch(0).get_shmem(scratchSize_rele_unpacked);
-          double* kele_unpacked = (double*)team.thread_scratch(0).get_shmem(scratchSize_kele_unpacked);
+          simd_type* rele_v        = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_rele_v);
+          simd_type* kele_v        = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_kele_v);
+          double*    coords        = (double*)team.thread_scratch(0).get_shmem(scratchSize_coords);
+          double*    rele_unpacked = (double*)team.thread_scratch(0).get_shmem(scratchSize_rele_unpacked);
+          double*    kele_unpacked = (double*)team.thread_scratch(0).get_shmem(scratchSize_kele_unpacked);
           //
           // Element type for eleID
           // !!! WARNING !!! This step assumes that the 'vecSize' elements are of the same type.
@@ -1061,8 +1161,12 @@ ScaledLaplacian::GetLinearSystem_v(
                   //
                   numNodes = fe2DQ1::numNode;
                   // Initialize scratch memory to zero
-                  for (int i = 0; i < numNodes; ++i) { rele_v[i] = simd_type(0); }
-                  for (int i = 0; i < numNodes * numNodes; ++i) { kele_v[i] = simd_type(0); }
+                  for (int i = 0; i < numNodes; ++i) {
+                    rele_v[i] = simd_type(0);
+                  }
+                  for (int i = 0; i < numNodes * numNodes; ++i) {
+                    kele_v[i] = simd_type(0);
+                  }
                   //
                   std::array<simd_type, fe2DQ1::numNode * fe2DQ1::sdim> coords_v{};
                   {
@@ -1107,8 +1211,12 @@ ScaledLaplacian::GetLinearSystem_v(
                 case 2: {
                   numNodes = fe2DQ2::numNode;
                   // Initialize scratch memory to zero
-                  for (int i = 0; i < numNodes; ++i) { rele_v[i] = simd_type(0); }
-                  for (int i = 0; i < numNodes * numNodes; ++i) { kele_v[i] = simd_type(0); }
+                  for (int i = 0; i < numNodes; ++i) {
+                    rele_v[i] = simd_type(0);
+                  }
+                  for (int i = 0; i < numNodes * numNodes; ++i) {
+                    kele_v[i] = simd_type(0);
+                  }
                   //
                   std::array<simd_type, fe2DQ2::numNode * fe2DQ2::sdim> coords_v{};
                   {
