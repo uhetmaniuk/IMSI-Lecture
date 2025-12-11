@@ -49,7 +49,6 @@ struct MFEMAssemblyFunctor
   Kokkos::View<double*, ExecutionSpace> nodeCoords;
   Kokkos::View<int**, ExecutionSpace>   cellToNode;
   int                                   numEle;
-  int                                   warpSize;
 
   // Quadrature data
   Kokkos::View<double*, ExecutionSpace> quadWeight;
@@ -84,8 +83,7 @@ struct MFEMAssemblyFunctor
     scratch_double_1d rhs(teamMember.team_scratch(1), numFineNodes);
 
     // Extract globalToFree and freeToGlobal mappings for interior DOFs
-    // Interior DOFs are those where (ix > 0) && (iy > 0) && (ix <= ratio) && (iy <= ratio)
-    // Note: The condition should be (ix < ratio) && (iy < ratio) for interior nodes
+    // Interior DOFs are those where (ix > 0) && (ix < ratio) && (iy > 0) && (iy < ratio)
     // Number of free DOFs = (ratio-1) * (ratio-1)
     int const           numFreeDofs = (ratio - 1) * (ratio - 1);
     scratch_int_1d      globalToFree(teamMember.team_scratch(1), numFineNodes);
@@ -598,6 +596,66 @@ class ScaledLaplacianCuda
   Kokkos::View<double*, ExecutionSpace> quadEta_d;
   Kokkos::View<double*, ExecutionSpace> quadZeta_d;
 
+  /// \brief Structure to hold mesh data on device
+  struct MeshDeviceData
+  {
+    Kokkos::View<int*, ExecutionSpace>    cellTypes;
+    Kokkos::View<double*, ExecutionSpace> nodeCoords;
+    Kokkos::View<int**, ExecutionSpace>   cellToNode;
+  };
+
+  /// \brief Copy mesh data to device
+  ///
+  /// Extracts mesh topology and geometry to device-accessible Kokkos::Views
+  /// \return MeshDeviceData structure with device views
+  MeshDeviceData
+  CopyMeshToDevice() const
+  {
+    int const numCells = meshInfo.mesh.NumberCells();
+    int const numNodes = meshInfo.mesh.NumberVertices();
+    int const sdim     = meshInfo.mesh.GetSpatialDimension();
+
+    MeshDeviceData data;
+
+    // Copy cell types
+    data.cellTypes = Kokkos::View<int*, ExecutionSpace>("cellTypes", numCells);
+    {
+      auto  cellTypes_h   = Kokkos::create_mirror_view(data.cellTypes);
+      auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
+      Kokkos::parallel_for("CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
+        cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+      });
+      Kokkos::deep_copy(data.cellTypes, cellTypes_h);
+    }
+
+    // Copy node coordinates (interleaved)
+    data.nodeCoords = Kokkos::View<double*, ExecutionSpace>("nodeCoords", numNodes * sdim);
+    {
+      auto  nodeCoords_h = Kokkos::create_mirror_view(data.nodeCoords);
+      auto& mesh_ref     = meshInfo.mesh;
+      Kokkos::parallel_for("NodeCoords_Copy", Kokkos::RangePolicy<HostSpace>(0, numNodes), [=, &mesh_ref](const int in) {
+        auto const vertex = mesh_ref.GetVertex(in);
+        for (int d = 0; d < sdim; ++d) { nodeCoords_h(in * sdim + d) = vertex[d]; }
+      });
+      Kokkos::deep_copy(data.nodeCoords, nodeCoords_h);
+    }
+
+    // Copy cell-to-node connectivity
+    data.cellToNode = Kokkos::View<int**, ExecutionSpace>("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+    {
+      auto  cellToNode_h = Kokkos::create_mirror_view(data.cellToNode);
+      auto& mesh_ref     = meshInfo.mesh;
+      Kokkos::parallel_for("CellToNodes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=, &mesh_ref](const int ic) {
+        auto const& nodeList = mesh_ref.NodeList(ic);
+        auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
+        for (int in = 0; in < nodeList.size() && in < 4; ++in) { c2n_ic(in) = nodeList[in]; }
+      });
+      Kokkos::deep_copy(data.cellToNode, cellToNode_h);
+    }
+
+    return data;
+  }
+
  protected:
   /// \brief Host-side Q1 element assembly for MFEM fine elements
   ///
@@ -668,14 +726,14 @@ class ScaledLaplacianCuda
         }
       }
 
-      // Symmetrize
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
-      }
-
       // Assemble RHS
       double fq = f_func(xq, yq, 0.0);
       for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * coeff; }
+    }
+
+    // Symmetrize the matrix once after all quadrature points
+    for (int jn = 0; jn < nNodes; ++jn) {
+      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
     }
   }
 
@@ -965,10 +1023,9 @@ class ScaledLaplacianCuda
       // Assemble RHS
       Scalar fq = f(xq, yq, 0);
       for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * coeff; }
-
     }  // for (int iq = 0; iq < ruleLen; ++iq)
 
-    // Symmetrize
+    // Symmetrize the matrix once after all quadrature points
     for (int jn = 0; jn < nNodes; ++jn) {
       for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
     }
@@ -992,47 +1049,8 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
 
   printf("Number of colors: %d\n", c2e.numRows());
 
-  // ====================================================================
-  // Extract mesh data to device-accessible structures
-  // ====================================================================
-
-  int const numCells = meshInfo.mesh.NumberCells();
-  int const numNodes = meshInfo.mesh.NumberVertices();
-
-  // Create device views for mesh data
-  Kokkos::View<int*, ExecutionSpace> cellTypes_d("cellTypes", numCells);
-  {
-    auto  cellTypes_h   = Kokkos::create_mirror_view(cellTypes_d);
-    auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
-    Kokkos::parallel_for("CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
-      cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
-    });
-    Kokkos::deep_copy(cellTypes_d, cellTypes_h);
-  }
-
-  Kokkos::View<double*, ExecutionSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
-  {
-    auto  nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
-    auto& mesh_ref     = meshInfo.mesh;
-    Kokkos::parallel_for("NodeCoords_Copy", Kokkos::RangePolicy<HostSpace>(0, numNodes), [=, &mesh_ref](const int in) {
-      auto const vertex        = mesh_ref.GetVertex(in);
-      nodeCoords_h(in * 2 + 0) = vertex[0];
-      nodeCoords_h(in * 2 + 1) = vertex[1];
-    });
-    Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
-  }
-
-  Kokkos::View<int**, ExecutionSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
-  {
-    auto  cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
-    auto& mesh_ref     = meshInfo.mesh;
-    Kokkos::parallel_for("CellToNodes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=, &mesh_ref](const int ic) {
-      auto const& nodeList = mesh_ref.NodeList(ic);
-      auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
-      for (int in = 0; in < nodeList.size() && in < 4; ++in) { c2n_ic(in) = nodeList[in]; }
-    });
-    Kokkos::deep_copy(cellToNode_d, cellToNode_h);
-  }
+  // Copy mesh data to device
+  auto meshData = CopyMeshToDevice();
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -1060,9 +1078,9 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     }
 
     // Capture device views for lambda
-    auto cellTypes      = cellTypes_d;
-    auto nodeCoords     = nodeCoords_d;
-    auto cellToNode     = cellToNode_d;
+    auto cellTypes      = meshData.cellTypes;
+    auto nodeCoords     = meshData.nodeCoords;
+    auto cellToNode     = meshData.cellToNode;
     auto eleList_device = eleList_d;
 
     // Parallel assembly for this color (no conflicts within same color)
@@ -1105,97 +1123,6 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
               &rele[0],
               &kele[0]);
 
-          /*
-              // Compute element matrices
-              for (int i = 0; i < nNodes; ++i) { rele[i] = 0.0; }
-              for (int i = 0; i < nNodes * nNodes; ++i) { kele[i] = 0.0; }
-
-              // === Inline Q1 assembly ===
-              double NandGradN[nNodes * (dim + 1)];
-              double pointJac[dim * (dim + 1)];
-              double GradPhi[nNodes * dim];
-
-              for (int iq = 0; iq < ruleLen; ++iq) {
-                fe2DQ1Cuda::GetValuesGradients(
-                    quadXi_local(iq), quadEta_local(iq), quadZeta_local(iq), NandGradN);
-
-                // Compute Jacobian
-                for (int jd = 0; jd <= dim; ++jd) {
-                  for (int id = 0; id < dim; ++id) {
-                    double jacEntry = 0.0;
-                    for (int kn = 0; kn < nNodes; ++kn) {
-                      jacEntry += NandGradN[kn + jd * nNodes] * coords[id + kn * dim];
-                    }
-                    pointJac[id + jd * dim] = jacEntry;
-                  }
-                }
-
-                // Extract physical coordinates of quadrature point
-                double const xq = pointJac[0];
-                double const yq = pointJac[1];
-
-                // Inverse Jacobian
-                double detJ = 1.0;
-                double* __restrict J = &pointJac[dim];
-                InverseInPlaceCuda<dim>(J, detJ);
-
-                // Transform gradients
-                double* __restrict GradN = &NandGradN[nNodes];
-                for (int jn = 0; jn < nNodes; ++jn) {
-                  for (int in = 0; in < dim; ++in) {
-                    double tmpGrad = 0.0;
-                    for (int kn = 0; kn < dim; ++kn) {
-                      tmpGrad += J[in + kn * dim] * GradN[jn + kn * nNodes];
-                    }
-                    GradPhi[in + jn * dim] = tmpGrad;
-                  }
-                }
-
-                // Evaluate material coefficients at quadrature point (device-side)
-                // TODO: Make this more general - currently hardcoded for specific functions
-                double alpha_x_q = 1.0;  // Constant for now
-                double alpha_y_q = 1.0;  // Constant for now
-                // For varying coefficients, evaluate at (xq, yq):
-                // double alpha_x_q = ... function of xq, yq ...
-                // double alpha_y_q = ... function of xq, yq ...
-
-                // Assemble stiffness
-                double w_v = quadWeight_local(iq);
-                double coeff = w_v * detJ;
-
-                for (int jn = 0; jn < nNodes; ++jn) {
-                  auto const a_dphi_xj = GradPhi[0 + jn * dim] * alpha_x_q;
-                  auto const a_dphi_yj = GradPhi[1 + jn * dim] * alpha_y_q;
-                  for (int in = jn; in <= nNodes; ++in) {
-                    double sum = 0.0;
-                    sum += GradPhi[0 + in * dim] * a_dphi_xj;
-                    sum += GradPhi[1 + in * dim] * a_dphi_yj;
-                    kele[in + jn * nNodes] += sum * coeff;
-                  }
-                }
-
-                // Symmetrize
-                for (int jn = 0; jn < nNodes; ++jn) {
-                  for (int in = 0; in < jn; ++in) {
-                    kele[in + jn * nNodes] = kele[jn + in * nNodes];
-                  }
-                }
-
-                // Assemble RHS
-                if (has_f) {
-                  // Evaluate forcing function at quadrature point (device-side)
-                  // TODO: Make this more general - currently hardcoded for specific function
-                  // Current function: f(x,y) = 2*pi^2*sin(pi*x)*sin(pi*y)
-                  constexpr double pi = 3.14159265358979323846;
-                  double fq = 2.0 * pi * pi * sin(pi * xq) * sin(pi * yq);
-                  for (int in = 0; in < nNodes; ++in) {
-                    rele[in] += fq * NandGradN[in] * coeff;
-                  }
-                }
-              }
-          */
-          // === End inline Q1 assembly ===
-
           // Scatter to global arrays (no atomics needed due to coloring)
           for (int in = 0; in < nNodes; ++in) { rhs(nodeList[in]) += rele[in]; }
 
@@ -1214,41 +1141,6 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
 
     Kokkos::fence();
   }
-
-  /*
-  // Handle MFEM_L elements if present (process on host)
-  bool hasMFEM = false;
-  for (int ic = 0; ic < meshInfo.mesh.NumberCells(); ++ic) {
-    if (meshInfo.mesh.GetCellType(ic) == ElementType::MFEM_L) {
-      hasMFEM = true;
-      break;
-    }
-  }
-
-  if (hasMFEM) {
-    printf("Processing MFEM_L elements on host...\n");
-
-    // Transfer data to host
-    auto rhs_h = Kokkos::create_mirror_view(rhs);
-    auto matRowPtr_h = Kokkos::create_mirror_view(matRowPtr);
-    auto matColIdx_h = Kokkos::create_mirror_view(matColIdx);
-    auto matValues_h = Kokkos::create_mirror_view(matValues);
-
-    Kokkos::deep_copy(rhs_h, rhs);
-    Kokkos::deep_copy(matRowPtr_h, matRowPtr);
-    Kokkos::deep_copy(matColIdx_h, matColIdx);
-    Kokkos::deep_copy(matValues_h, matValues);
-
-    // Process MFEM elements on host
-    ProcessMFEMElements(rhs_h, matRowPtr_h, matColIdx_h, matValues_h);
-
-    // Copy back to device
-    Kokkos::deep_copy(rhs, rhs_h);
-    Kokkos::deep_copy(matValues, matValues_h);
-
-    printf("MFEM_L processing complete.\n");
-  }
-  */
 }
 
 /// Implementation of GetLinearSystemMFEM
@@ -1268,47 +1160,8 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
 
   printf("Number of colors: %d\n", c2e.numRows());
 
-  // ====================================================================
-  // Extract mesh data to device-accessible structures
-  // ====================================================================
-
-  int const numCells = meshInfo.mesh.NumberCells();
-  int const numNodes = meshInfo.mesh.NumberVertices();
-
-  // Create device views for mesh data
-  Kokkos::View<int*, ExecutionSpace> cellTypes_d("cellTypes", numCells);
-  {
-    auto  cellTypes_h   = Kokkos::create_mirror_view(cellTypes_d);
-    auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
-    Kokkos::parallel_for("CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
-      cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
-    });
-    Kokkos::deep_copy(cellTypes_d, cellTypes_h);
-  }
-
-  Kokkos::View<double*, ExecutionSpace> nodeCoords_d("nodeCoords", numNodes * sdim);  // x,y interleaved
-  {
-    auto  nodeCoords_h = Kokkos::create_mirror_view(nodeCoords_d);
-    auto& mesh_ref     = meshInfo.mesh;
-    Kokkos::parallel_for("NodeCoords_Copy", Kokkos::RangePolicy<HostSpace>(0, numNodes), [=, &mesh_ref](const int in) {
-      auto const vertex        = mesh_ref.GetVertex(in);
-      nodeCoords_h(in * 2 + 0) = vertex[0];
-      nodeCoords_h(in * 2 + 1) = vertex[1];
-    });
-    Kokkos::deep_copy(nodeCoords_d, nodeCoords_h);
-  }
-
-  Kokkos::View<int**, ExecutionSpace> cellToNode_d("cellToNode", numCells, 4);  // Q1 has 4 nodes max
-  {
-    auto  cellToNode_h = Kokkos::create_mirror_view(cellToNode_d);
-    auto& mesh_ref     = meshInfo.mesh;
-    Kokkos::parallel_for("CellToNodes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=, &mesh_ref](const int ic) {
-      auto const& nodeList = mesh_ref.NodeList(ic);
-      auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
-      for (int in = 0; in < nodeList.size() && in < 4; ++in) { c2n_ic(in) = nodeList[in]; }
-    });
-    Kokkos::deep_copy(cellToNode_d, cellToNode_h);
-  }
+  // Copy mesh data to device
+  auto meshData = CopyMeshToDevice();
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -1336,9 +1189,9 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     }
 
     // Capture device views for lambda
-    auto cellTypes      = cellTypes_d;
-    auto nodeCoords     = nodeCoords_d;
-    auto cellToNode     = cellToNode_d;
+    auto cellTypes      = meshData.cellTypes;
+    auto nodeCoords     = meshData.nodeCoords;
+    auto cellToNode     = meshData.cellToNode;
     auto eleList_device = eleList_d;
 
     // Calculate scratch memory requirements
@@ -1393,7 +1246,6 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         nodeCoords,
         cellToNode,
         numEle,
-        32,
         quadWeight_local,
         quadXi_local,
         quadEta_local,

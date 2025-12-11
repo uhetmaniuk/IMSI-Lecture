@@ -183,10 +183,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
         }
       }
     }
-    // Symmetrize the matrix
-    for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
-    }
     //
     Scalar fq(0);
     if (f.has_value()) { fq = f->operator()(xq, yq, zq); }
@@ -249,14 +245,14 @@ mutable std::vector< std::vector<double> > phiMFEM;
           }
         }
       }
-      // Symmetrize the matrix
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
-      }
       //
       double fq = 0.0;
       if (f.has_value()) { fq = f->operator()(xq, yq, zq); }
       for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * weight[iq] * detJ; }
+    }
+    // Symmetrize the matrix once after all quadrature points
+    for (int jn = 0; jn < nNodes; ++jn) {
+      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
     }
   }
 
@@ -342,10 +338,6 @@ mutable std::vector< std::vector<double> > phiMFEM;
           kele[in + jn * nNodes] += sum * coeff;
         }
       }
-      // Symmetrize the matrix
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
-      }
       //
       Scalar fq(0);
       if (has_f) {
@@ -356,6 +348,10 @@ mutable std::vector< std::vector<double> > phiMFEM;
         }
         for (int in = 0; in < nNodes; ++in) { rele[in] += fq * NandGradN[in] * coeff; }
       }
+    }
+    // Symmetrize the matrix once after all quadrature points
+    for (int jn = 0; jn < nNodes; ++jn) {
+      for (int in = jn + 1; in < nNodes; ++in) { kele[in + jn * nNodes] = kele[jn + in * nNodes]; }
     }
   }
 
