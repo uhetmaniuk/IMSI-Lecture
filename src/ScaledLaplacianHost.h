@@ -42,58 +42,66 @@ class ScaledLaplacianHost
     getQuadrature(ruleType, sdim, ruleOrder, ruleLength, weight, xi, eta, zeta);
   }
 
-  template <typename Device>
-  void
-  GetLinearSystem(
-      Kokkos::View<double*, Device> rhs,
-      Kokkos::View<size_t*, Device> matRowPtr,
-      Kokkos::View<int*, Device>    matColIdx,
-      Kokkos::View<double*, Device> matValues) const;
-
   template <typename Device, bool useSIMD, bool useColoring = true>
   void
   GetLinearSystem_v(
       Kokkos::View<double*, Device> rhs,
       Kokkos::View<size_t*, Device> matRowPtr,
       Kokkos::View<int*, Device>    matColIdx,
-      Kokkos::View<double*, Device> matValues) const;
+      Kokkos::View<double*, Device> matValues);
 
-  mutable std::vector<std::vector<double>> phiMFEM;
-  int const                                ratio = 32;
+  std::vector<std::vector<double>> phiMFEM;
+  int const                        ratio = 32;
 
   void
-  OutputMFEMFine(double* uCoarse, int numEleX, int numEleY) const
+  OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const
   {
     //
-    int                 numFineEleX  = ratio * numEleX;
-    int                 numFineEleY  = ratio * numEleY;
-    int                 numFineNodes = (numFineEleX + 1) * (numFineEleY + 1);
-    std::vector<double> uFine(numFineNodes, 0);
-    std::vector<double> uTrace(4);
-    //
-    for (int iy = 0; iy < numEleY; ++iy) {
-      for (int ix = 0; ix < numEleX; ++ix) {
-        int         eleID = ix + iy * numEleX;
-        auto const& phi   = phiMFEM[eleID];
-        uTrace[0]         = uCoarse[ix + iy * (numEleX + 1)];
-        uTrace[1]         = uCoarse[ix + 1 + iy * (numEleX + 1)];
-        uTrace[2]         = uCoarse[ix + 1 + (iy + 1) * (numEleX + 1)];
-        uTrace[3]         = uCoarse[ix + (iy + 1) * (numEleX + 1)];
-        for (int jy = 0; jy <= ratio; ++jy) {
-          for (int jx = 0; jx <= ratio; ++jx) {
-            int nodeID    = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
-            uFine[nodeID] = 0;
-            for (int k = 0; k < 4; ++k) {
-              uFine[nodeID] += phi[jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1)] * uTrace[k];
+    int const numFineEleX  = ratio * numEleX;
+    int const numFineEleY  = ratio * numEleY;
+    int const numFineNodes = (numFineEleX + 1) * (numFineEleY + 1);
+    int const numCoarseEle = numEleX * numEleY;
+
+    // Create Kokkos::Views for parallel computation
+    Kokkos::View<double*, host_execution_space> uFine_h("uFine", numFineNodes);
+    Kokkos::View<const double*, host_execution_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>> uCoarse_h(
+        uCoarse, (numEleX + 1) * (numEleY + 1));
+
+    // Parallel reconstruction over coarse elements
+    // Use regular lambda with reference capture to access phiMFEM directly (host-only)
+    Kokkos::parallel_for(
+        "MFEM_Reconstruction", Kokkos::RangePolicy<host_execution_space>(0, numCoarseEle), [&](int eleID) {
+          int const iy = eleID / numEleX;
+          int const ix = eleID % numEleX;
+
+          // Extract coarse DOFs for this element (uTrace)
+          double uTrace[4];
+          uTrace[0] = uCoarse_h(ix + iy * (numEleX + 1));
+          uTrace[1] = uCoarse_h(ix + 1 + iy * (numEleX + 1));
+          uTrace[2] = uCoarse_h(ix + 1 + (iy + 1) * (numEleX + 1));
+          uTrace[3] = uCoarse_h(ix + (iy + 1) * (numEleX + 1));
+
+          // Access phiMFEM directly via reference capture
+          auto const& phi = phiMFEM[eleID];
+
+          // Reconstruct fine nodes for this coarse element
+          for (int jy = 0; jy <= ratio; ++jy) {
+            for (int jx = 0; jx <= ratio; ++jx) {
+              int    nodeID = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
+              double uVal   = 0.0;
+              for (int k = 0; k < 4; ++k) {
+                int const phiIdx = jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1);
+                uVal += phi[phiIdx] * uTrace[k];
+              }
+              uFine_h(nodeID) = uVal;
             }
           }
-        }
-      }
-    }
-    //
+        });
+    Kokkos::fence();
+
     std::ofstream outFine("outputFine.txt");
     for (int i = 0; i < numFineNodes; ++i) {
-      outFine << uFine[i] << std::endl;
+      outFine << uFine_h(i) << std::endl;
     }
     outFine.close();
   }
@@ -112,7 +120,6 @@ class ScaledLaplacianHost
   std::vector<double> weight;
   std::vector<double> xi, eta, zeta;
 
- protected:
   using simd_type = Kokkos::Experimental::native_simd<double>;
 
   static simd_type
@@ -128,162 +135,6 @@ class ScaledLaplacianHost
     }
     val.copy_from(&ga[0], Kokkos::Experimental::element_aligned_tag());
     return val;
-  }
-
-  template <int dim, int nNodes, typename ElementClass, typename Scalar>
-  void
-  ElementaryDataLagrangeFE_impl(
-      ElementClass&                           element,
-      const std::array<Scalar, nNodes * dim>& nodes,
-      Scalar                                  w,
-      Scalar                                  xi,
-      Scalar                                  eta,
-      Scalar                                  zeta,
-      Scalar*                                 rele,
-      Scalar*                                 kele) const
-  {
-    std::array<Scalar, dim*(dim + 1)> pointJac;
-    std::array<Scalar, dim>           alpha;
-    std::array<Scalar, nNodes * dim>  GradPhi;
-    //
-    auto NandGradN = element.GetValuesGradients(xi, eta, zeta);
-    pointJac.fill(Scalar(0));
-    for (int jd = 0; jd <= dim; ++jd) {
-      for (int id = 0; id < dim; ++id) {
-        for (int kn = 0; kn < nNodes; ++kn) {
-          pointJac[id + jd * dim] += NandGradN[kn + jd * nNodes] * nodes[id + kn * dim];
-        }
-      }
-    }
-    auto const xq = pointJac[0];
-    auto const yq = (dim > 1) ? pointJac[1] : Scalar(0);
-    auto const zq = (dim > 2) ? pointJac[2] : Scalar(0);
-    if (ax.has_value()) {
-      alpha[0] = ax->operator()(xq, yq, zq);
-    }
-    if constexpr (dim > 1) {
-      if (ay.has_value()) {
-        alpha[1] = ay->operator()(xq, yq, zq);
-      }
-    }
-    if constexpr (dim > 2) {
-      if (az.has_value()) {
-        alpha[2] = az->operator()(xq, yq, zq);
-      }
-    }
-    //
-    // Get the inverse of the Jacobian
-    //
-    Scalar detJ(1);
-    Scalar* __restrict J = &pointJac[dim];
-    InverseInPlace<dim>(J, detJ);
-    //
-    Scalar* __restrict GradN = &NandGradN[nNodes];
-    GradPhi.fill(Scalar(0));
-    for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = 0; in < dim; ++in) {
-        for (int kn = 0; kn < dim; ++kn) {
-          GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes];
-        }
-      }
-    }
-    //
-    for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = 0; in <= jn; ++in) {
-        for (int kn = 0; kn < dim; ++kn) {
-          kele[in + jn * nNodes] += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim] * w * detJ;
-        }
-      }
-    }
-    //
-    Scalar fq(0);
-    if (f.has_value()) {
-      fq = f->operator()(xq, yq, zq);
-    }
-    for (int in = 0; in < nNodes; ++in) {
-      rele[in] += fq * NandGradN[in] * w * detJ;
-    }
-  }
-
-  template <int dim, int nNodes, typename ElementClass>
-  void
-  ElementaryDataLagrangeFE(ElementClass& element, const std::vector<int>& nodeList, double* rele, double* kele) const
-  {
-    std::array<double, nNodes * dim> nodes;
-    for (int i = 0; i < nNodes; ++i) {
-      auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-      std::copy(&vertex[0], &vertex[0] + dim, &nodes[i * dim]);
-    }
-    //
-    std::array<double, dim*(dim + 1)> pointJac;
-    std::array<double, dim>           alpha;
-    std::array<double, nNodes * dim>  GradPhi;
-    //
-    for (int iq = 0; iq < ruleLength; ++iq) {
-      auto NandGradN = element.GetValuesGradients(xi[iq], eta[iq], zeta[iq]);
-      pointJac.fill(0.0);
-      for (int jd = 0; jd <= dim; ++jd) {
-        for (int id = 0; id < dim; ++id) {
-          for (int kn = 0; kn < nNodes; ++kn) {
-            pointJac[id + jd * dim] += NandGradN[kn + jd * nNodes] * nodes[id + kn * dim];
-          }
-        }
-      }
-      auto const xq = pointJac[0];
-      auto const yq = (dim > 1) ? pointJac[1] : double(0.0);
-      auto const zq = (dim > 2) ? pointJac[2] : double(0.0);
-      if (ax.has_value()) {
-        alpha[0] = ax->operator()(xq, yq, zq);
-      }
-      if constexpr (dim > 1) {
-        if (ay.has_value()) {
-          alpha[1] = ay->operator()(xq, yq, zq);
-        }
-      }
-      if constexpr (dim > 2) {
-        if (az.has_value()) {
-          alpha[2] = az->operator()(xq, yq, zq);
-        }
-      }
-      //
-      // Get the inverse of the Jacobian
-      //
-      double detJ          = 1.0;
-      double* __restrict J = &pointJac[dim];
-      InverseInPlace<dim>(J, detJ);
-      //
-      double* __restrict GradN = &NandGradN[nNodes];
-      GradPhi.fill(0);
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = 0; in < dim; ++in) {
-          for (int kn = 0; kn < dim; ++kn) {
-            GradPhi[in + jn * dim] += J[in + kn * dim] * GradN[jn + kn * nNodes];
-          }
-        }
-      }
-      //
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = 0; in <= jn; ++in) {
-          for (int kn = 0; kn < dim; ++kn) {
-            kele[in + jn * nNodes] += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim] * weight[iq] * detJ;
-          }
-        }
-      }
-      //
-      double fq = 0.0;
-      if (f.has_value()) {
-        fq = f->operator()(xq, yq, zq);
-      }
-      for (int in = 0; in < nNodes; ++in) {
-        rele[in] += fq * NandGradN[in] * weight[iq] * detJ;
-      }
-    }
-    // Symmetrize the matrix once after all quadrature points
-    for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = jn + 1; in < nNodes; ++in) {
-        kele[in + jn * nNodes] = kele[jn + in * nNodes];
-      }
-    }
   }
 
   template <typename Scalar, typename ElementClass>
@@ -402,7 +253,7 @@ class ScaledLaplacianHost
       const Scalar*        coords_v,
       Scalar*              rele,
       Scalar*              kele,
-      std::vector<Scalar>& phi) const
+      std::vector<Scalar>& phi)
   {
     /// TODO Generalize these parameters
     size_t    maxNumDofsPerEle = 4;
@@ -678,41 +529,55 @@ class ScaledLaplacianHost
     double time_direct_solve = timer.seconds();
     double time_direct_total = time_direct_factor + time_direct_solve;
     printf(", Solve: %e s, Total: %e s\n", time_direct_solve, time_direct_total);
+    timer.reset();
     //
     // Solve with PCG + SSOR preconditioning - only for first 3 basis functions
-    timer.reset();
-    std::vector<Scalar> utmp_pcg(numVectorsToSolve * n, 0);
+    //
     // Initialize with Q1 shape functions (bilinear basis) for first 3 basis functions
     // These satisfy boundary conditions and provide a good initial guess
+    std::vector<Scalar> utmp_pcg(numVectorsToSolve * n, 0);
     for (int ii = 0; ii < n; ++ii) {
       int const grow = freeToGlobal[ii];
-      int const ix = grow % (ratio + 1);
-      int const iy = grow / (ratio + 1);
+      int const ix   = grow % (ratio + 1);
+      int const iy   = grow / (ratio + 1);
       // Parametric coordinates in [0,1]
       Scalar const xi_param  = Scalar(ix) / Scalar(ratio);
       Scalar const eta_param = Scalar(iy) / Scalar(ratio);
       // Q1 basis functions: N0 = (1-xi)(1-eta), N1 = xi(1-eta), N2 = xi*eta
       utmp_pcg[ii + 0 * n] = (Scalar(1) - xi_param) * (Scalar(1) - eta_param);  // Corner 0
-      utmp_pcg[ii + 1 * n] = xi_param * (Scalar(1) - eta_param);                 // Corner 1
-      utmp_pcg[ii + 2 * n] = xi_param * eta_param;                               // Corner 2
+      utmp_pcg[ii + 1 * n] = xi_param * (Scalar(1) - eta_param);                // Corner 1
+      utmp_pcg[ii + 2 * n] = xi_param * eta_param;                              // Corner 2
     }
     std::vector<Scalar> work(4 * n);  // Workspace for PCG
-    int total_iters = 0;
-    double omega = 1.0;  // SSOR relaxation parameter
-    int numSSORSweeps = 1;  // Number of SSOR sweeps per preconditioning step
+    int                 total_iters   = 0;
+    double              omega         = 1.0;  // SSOR relaxation parameter
+    int                 numSSORSweeps = 1;    // Number of SSOR sweeps per preconditioning step
     for (int ir = 0; ir < numVectorsToSolve; ++ir) {
       int iter = PCG_Solve_SSOR_Precond(
-          n, newRowPtr.data(), newColIdx.data(), newValues.data(),
-          diagValues.data(), &btmp[ir * n], &utmp_pcg[ir * n], work.data(),
-          omega, numSSORSweeps, 1e-12, 1000);
+          n,
+          newRowPtr.data(),
+          newColIdx.data(),
+          newValues.data(),
+          diagValues.data(),
+          &btmp[ir * n],
+          &utmp_pcg[ir * n],
+          work.data(),
+          omega,
+          numSSORSweeps,
+          1e-12,
+          1000);
       total_iters += (iter > 0) ? iter : 1000;
     }
     double time_pcg_ssor = timer.seconds();
-    printf(" --- [PCG+SSOR]      Total: %e s, Avg iterations: %.1f (omega=%.1f, sweeps=%d, solved %d/%d)\n",
-           time_pcg_ssor, total_iters / double(numVectorsToSolve), omega, numSSORSweeps,
-           numVectorsToSolve, numVectors);
-    printf(" --- [Comparison]    Speedup: %.2fx (Direct/PCG)\n",
-           time_direct_total / time_pcg_ssor);
+    printf(
+        " --- [PCG+SSOR]      Total: %e s, Avg iterations: %.1f (omega=%.1f, sweeps=%d, solved %d/%d)\n",
+        time_pcg_ssor,
+        total_iters / double(numVectorsToSolve),
+        omega,
+        numSSORSweeps,
+        numVectorsToSolve,
+        numVectors);
+    printf(" --- [Comparison]    Speedup: %.2fx (Direct/PCG)\n", time_direct_total / time_pcg_ssor);
     //
     // Use direct solver solution (can switch to PCG if desired)
     std::vector<Scalar>& utmp = utmp_direct;
@@ -739,8 +604,9 @@ class ScaledLaplacianHost
     // Compute element stiffness matrix: kele[ir,jr] = phi[:,ir]^T * K * phi[:,jr]
     // Here we need the full matrix-vector product over all nodes
     {
-      SparseMatrix<Scalar> K(numNodes, numNodes, matColIdx.size(), matRowPtr.data(), matColIdx.data(), matValues.data());
-      std::vector<Scalar>  Kphi(numVectors * numNodes);
+      SparseMatrix<Scalar> K(
+          numNodes, numNodes, matColIdx.size(), matRowPtr.data(), matColIdx.data(), matValues.data());
+      std::vector<Scalar> Kphi(numVectors * numNodes);
       K.Apply(numVectors, &(phi[0]), &Kphi[0]);
       for (int ir = 0; ir < numVectors; ++ir) {
         for (int jr = 0; jr <= ir; ++jr) {
@@ -754,7 +620,8 @@ class ScaledLaplacianHost
       }
     }
   }
-};
+
+};  // class ScaledLaplacianHost
 
 }  // namespace IMSI
 
@@ -764,170 +631,13 @@ class ScaledLaplacianHost
 
 namespace IMSI {
 
-template <typename Device>
-void
-ScaledLaplacianHost::GetLinearSystem(
-    Kokkos::View<double*, Device> rhs,
-    Kokkos::View<size_t*, Device> matRowPtr,
-    Kokkos::View<int*, Device>    matColIdx,
-    Kokkos::View<double*, Device> matValues) const
-{
-  size_t maxNumDofsPerEle = 0;
-  Kokkos::parallel_reduce(
-      "MaxDofsPerEle",
-      Kokkos::RangePolicy<Device>(0, meshInfo.mesh.NumberCells()),
-      KOKKOS_LAMBDA(const int& i, size_t& nMax) { nMax = std::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i))); },
-      Kokkos::Max<size_t>(maxNumDofsPerEle));
-
-  auto const& c2e  = meshInfo.c2e;
-  auto const  sdim = meshInfo.mesh.GetSpatialDimension();
-
-  for (int ic = 0; ic < c2e.numRows(); ++ic) {
-    auto const eleList = c2e.rowConst(ic);
-    Kokkos::parallel_for(
-        Kokkos::TeamPolicy<Device>(eleList.length, 1),
-        KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
-          auto const          ik = team.league_rank();
-          std::vector<double> rele(maxNumDofsPerEle);
-          std::vector<double> kele(maxNumDofsPerEle * maxNumDofsPerEle);
-          auto const          eleID    = eleList(ik);
-          auto                nodeList = meshInfo.mesh.NodeList(eleID);
-          //
-          rele.assign(size(nodeList), 0);
-          kele.assign(size(nodeList) * size(nodeList), 0);
-          //
-          // Element type for eleID
-          //
-          switch (meshInfo.mesh.GetCellType(eleID)) {
-            default:
-            case ElementType::Q1: {
-              switch (sdim) {
-                case 1: {
-                  std::array<double, fe1DQ1::numNode * fe1DQ1::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe1DQ1 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe1DQ1>(element, &coords[0], &rele[0], &kele[0]);
-                  break;
-                }
-                default:
-                case 2: {
-                  std::array<double, fe2DQ1::numNode * fe2DQ1::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe2DQ1 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe2DQ1>(element, &coords[0], &rele[0], &kele[0]);
-
-                  // Debug: Print first element RHS (CPU version)
-                  if (eleID == 0 && ic == 0) {
-                    double f_val = (f.has_value()) ? f.value()(0.5, 0.5, 0.0) : 0.0;
-                    printf(
-                        "CPU First element RHS: eleID=%d, f_val=%f, rele=[%e, %e, %e, %e]\n",
-                        eleID,
-                        f_val,
-                        rele[0],
-                        rele[1],
-                        rele[2],
-                        rele[3]);
-                    printf(
-                        "CPU nodeList=[%d,%d,%d,%d]\n",
-                        (int)nodeList[0],
-                        (int)nodeList[1],
-                        (int)nodeList[2],
-                        (int)nodeList[3]);
-                  }
-
-                  break;
-                }
-                case 3: {
-                  std::array<double, fe3DQ1::numNode * fe3DQ1::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe3DQ1 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe3DQ1>(element, &coords[0], &rele[0], &kele[0]);
-                  break;
-                }
-              }
-              break;
-            }  // case ElementType::Q1:
-            case ElementType::Q2: {
-              switch (sdim) {
-                case 1: {
-                  std::array<double, fe1DQ2::numNode * fe1DQ2::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe1DQ2 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe1DQ2>(element, &coords[0], &rele[0], &kele[0]);
-                  break;
-                }
-                default:
-                case 2: {
-                  std::array<double, fe2DQ2::numNode * fe2DQ2::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe2DQ2 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe2DQ2>(element, &coords[0], &rele[0], &kele[0]);
-                  break;
-                }
-                case 3: {
-                  std::array<double, fe3DQ2::numNode * fe3DQ2::sdim> coords{};
-                  for (int i = 0; i < size(nodeList); ++i) {
-                    auto const vertex = meshInfo.mesh.GetVertex(nodeList[i]);
-                    std::copy(&vertex[0], &vertex[0] + sdim, &coords[i * sdim]);
-                  }
-                  fe3DQ2 element;
-                  this->ElementaryDataLagrangeFE_t<double, fe3DQ2>(element, &coords[0], &rele[0], &kele[0]);
-                  break;
-                }
-              }
-              break;
-            }  // case ElementType::Q2
-            case ElementType::MFEM_L: {
-              switch (sdim) {
-                default: {
-                  exit(EXIT_FAILURE);
-                  break;
-                }
-              }
-              break;
-            }  // case ElementType::MFEM_L:
-          }
-          //
-          for (int in = 0; in < size(nodeList); ++in) {
-            rhs(nodeList[in]) += rele[in];
-          }
-          //
-          for (int in = 0; in < size(nodeList); ++in) {
-            auto const irow     = nodeList[in];
-            auto const colBegin = &matColIdx(matRowPtr(irow));
-            auto const colEnd   = &matColIdx(matRowPtr(irow + 1));
-            for (int jn = 0; jn < size(nodeList); ++jn) {
-              auto const pos = std::lower_bound(colBegin, colEnd, nodeList[jn]) - colBegin;
-              matValues(matRowPtr(irow) + pos) += kele[in + jn * size(nodeList)];
-            }
-          }
-        });
-    Kokkos::fence();
-  }
-}
-
 template <typename Device, bool useSIMD, bool useColoring>
 void
 ScaledLaplacianHost::GetLinearSystem_v(
     Kokkos::View<double*, Device> rhs,
     Kokkos::View<size_t*, Device> matRowPtr,
     Kokkos::View<int*, Device>    matColIdx,
-    Kokkos::View<double*, Device> matValues) const
+    Kokkos::View<double*, Device> matValues)
 {
   size_t maxNumDofsPerEle = 0;
   Kokkos::parallel_reduce(
@@ -939,7 +649,7 @@ ScaledLaplacianHost::GetLinearSystem_v(
   auto const& c2e  = meshInfo.c2e;
   auto const  sdim = meshInfo.mesh.GetSpatialDimension();
 
-  // TODO Remove the mutable characteristic
+  // TODO Is phiMFEM variable-type the best?
   phiMFEM.resize(meshInfo.mesh.NumberCells());
 
   int constexpr vecSize = (useSIMD) ? Kokkos::Experimental::native_simd<double>::size() : 1;

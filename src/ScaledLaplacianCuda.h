@@ -161,12 +161,12 @@ struct MFEMAssemblyFunctor
       // Corner (ratio, 0) - Basis 1
       int in                     = ratio;
       phi(in + 1 * numFineNodes) = 1.0;
-      // Corner (0, ratio) - Basis 3
-      in                         = ratio * (ratio + 1);
-      phi(in + 3 * numFineNodes) = 1.0;
       // Corner (ratio, ratio) - Basis 2
       in                         = ratio + ratio * (ratio + 1);
       phi(in + 2 * numFineNodes) = 1.0;
+      // Corner (0, ratio) - Basis 3
+      in                         = ratio * (ratio + 1);
+      phi(in + 3 * numFineNodes) = 1.0;
     });
 
     // Build boundary basis functions in parallel (skip corners)
@@ -574,18 +574,12 @@ struct MFEMAssemblyFunctor
     // Phi was initialized with boundary basis functions; now add interior solution
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree) {
       int const iGlobal = freeToGlobal(iFree);
+      double sum = 0;
       for (int ir = 0; ir < numVectorsToSolve; ++ir) {
         phi(iGlobal + ir * numFineNodes) = utmp(iFree + ir * numFreeDofs);
+        sum += utmp(iFree + ir * numFreeDofs);
       }
-    });
-    teamMember.team_barrier();
-
-    //// UH -> we should be able to merge these two parallel_for because phi(*, 3) is already computed on the boundary.
-
-    // Compute 4th basis function using partition of unity: phi[3] = 1 - phi[0] - phi[1] - phi[2]
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int ii) {
-      phi(ii + 3 * numFineNodes) =
-          1.0 - phi(ii + 0 * numFineNodes) - phi(ii + 1 * numFineNodes) - phi(ii + 2 * numFineNodes);
+      phi(iGlobal + 3 * numFineNodes) = 1.0 - sum;
     });
     teamMember.team_barrier();
 
@@ -611,7 +605,6 @@ struct MFEMAssemblyFunctor
     // kele = phi^T [[0]; [Kbi phi_i + Kbb phi_b]]
     // kele = phi_b^T ( Kbi phi_i + Kbb phi_b )
     // kele = phi_b^T ( Kbb phi_b - Kbi Kii^{-1} Kib phi_b ) -> Schur complement
-    //
 
     // Contribution from K_b (boundary-all coupling)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numBoundaryDofs), [&](int iBoundary) {
@@ -849,7 +842,6 @@ class ScaledLaplacianCuda
     return data;
   }
 
- protected:
   /// \brief Device kernel for Q1 element assembly
   ///
   /// Computes element stiffness matrix and RHS for a single Q1 element
