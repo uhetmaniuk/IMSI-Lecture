@@ -110,3 +110,40 @@ else()
   message(STATUS "CUDA assembly example disabled (Kokkos_ENABLE_CUDA not set)")
 endif()
 
+#
+# OpenMP assembly example (requires Kokkos with OpenMP support)
+# Uses ScaledLaplacian with Kokkos::OpenMP execution space
+#
+if(Kokkos_ENABLE_OPENMP)
+  add_executable(
+          openmp_assembly.exe
+          openmp_assembly.cpp
+  )
+
+  if(USE_TACHO)
+    target_include_directories(openmp_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+    )
+
+    target_link_libraries(openmp_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  else()
+    target_include_directories(openmp_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
+    )
+
+    target_link_libraries(openmp_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  endif()
+
+  message(STATUS "OpenMP assembly example enabled")
+else()
+  message(STATUS "OpenMP assembly example disabled (Kokkos_ENABLE_OPENMP not set)")
+endif()
+

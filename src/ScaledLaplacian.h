@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fstream>
 #include <functional>
 
 #include "../main_config.h"
@@ -62,6 +63,9 @@ struct MFEMAssemblyFunctor
   Kokkos::View<size_t*, ExecutionSpace> globalMatRowPtr;
   Kokkos::View<int*, ExecutionSpace>    globalMatColIdx;
   Kokkos::View<double*, ExecutionSpace> globalMatValues;
+
+  // MFEM basis functions (output) [numElements, phiSize]
+  Kokkos::View<double**, ExecutionSpace> phiMFEM_global;
 
   // Coefficient functors
   FuncX ax_func;
@@ -452,7 +456,7 @@ struct MFEMAssemblyFunctor
       double kFineEle[nNodesFine * nNodesFine];
 
       // Call element assembly (note: need to use template syntax for static member function)
-      ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::template ElementaryDataQ1<double>(
+      ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::template ElementaryDataQ1<double>(
           coords_fine,
           &quadWeight(0),
           &quadXi(0),
@@ -585,11 +589,21 @@ struct MFEMAssemblyFunctor
     });
     teamMember.team_barrier();
 
+    // Get coarse element ID for later scatter operations
+    int const ieleCoarse_actual = eleList_device(ieleCoarse);
+
+    // ========================================================================
+    // Save phi basis functions to global memory for later reconstruction
+    // ========================================================================
+    constexpr int numVectors = 4;  // Q1 coarse element has 4 nodes
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int idx) {
+      phiMFEM_global(ieleCoarse_actual, idx) = phi(idx);
+    });
+    teamMember.team_barrier();
+
     // ========================================================================
     // Compute coarse element stiffness matrix: kele = phi^T * Kfine * phi
     // ========================================================================
-    // Get coarse element ID for later scatter operations
-    int const ieleCoarse_actual = eleList_device(ieleCoarse);
 
     // Allocate scratch memory for kele (4x4 symmetric matrix)
     constexpr int     nNodesCoarse_k = 4;  // Q1 coarse element
@@ -690,12 +704,12 @@ struct MFEMAssemblyFunctor
 ///     Each must have operator()(double x, double y, double z) marked KOKKOS_INLINE_FUNCTION
 ///
 template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
-class ScaledLaplacianCuda
+class ScaledLaplacian
 {
  public:
   using HostSpace = Kokkos::DefaultHostExecutionSpace;
 
-  ScaledLaplacianCuda(
+  ScaledLaplacian(
       const MeshConnectivity<>& meshData,
       RuleType                  quadRule,
       int                       quadOrder,
@@ -711,7 +725,7 @@ class ScaledLaplacianCuda
   {
     auto const sdim = meshInfo.mesh.GetSpatialDimension();
     if (sdim != 2) {
-      throw std::runtime_error("ScaledLaplacianCuda is only implemented for 2D problems");
+      throw std::runtime_error("ScaledLaplacian is only implemented for 2D problems");
     }
 
     std::vector<double> weight;
@@ -764,6 +778,9 @@ class ScaledLaplacianCuda
       Kokkos::View<int*, ExecutionSpace>    matColIdx,
       Kokkos::View<double*, ExecutionSpace> matValues);
 
+  void
+  OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const;
+
   int const ratio = 32;  // For MFEM_L fine mesh refinement
 
  protected:
@@ -783,6 +800,10 @@ class ScaledLaplacianCuda
   Kokkos::View<double*, ExecutionSpace> quadXi_d;
   Kokkos::View<double*, ExecutionSpace> quadEta_d;
   Kokkos::View<double*, ExecutionSpace> quadZeta_d;
+
+  // MFEM basis functions stored on device [numElements, phiSize]
+  // phiSize = numVectors * numFineNodes = 4 * (ratio+1)^2
+  Kokkos::View<double**, ExecutionSpace> phiMFEM_d;
 
   /// \brief Structure to hold mesh data on device
   struct MeshDeviceData
@@ -969,7 +990,7 @@ class ScaledLaplacianCuda
 /// Implementation of GetLinearSystem
 template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
-ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
+ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     Kokkos::View<double*, ExecutionSpace> rhs,
     Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
     Kokkos::View<int*, ExecutionSpace>    matColIdx,
@@ -1088,7 +1109,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
 /// Implementation of GetLinearSystemMFEM
 template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
-ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
+ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     Kokkos::View<double*, ExecutionSpace> rhs,
     Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
     Kokkos::View<int*, ExecutionSpace>    matColIdx,
@@ -1118,6 +1139,13 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   auto ax_device = ax_func;
   auto ay_device = ay_func;
   auto f_device  = f_func;
+
+  // Allocate storage for MFEM basis functions on device
+  constexpr int numVectors_const = 4;  // Q1 coarse element has 4 nodes
+  constexpr int numFineNodes_const = (ratio + 1) * (ratio + 1);
+  constexpr int phiSize = numVectors_const * numFineNodes_const;
+  int const numElements = meshInfo.mesh.NumberCells();
+  phiMFEM_d = Kokkos::View<double**, ExecutionSpace>("phiMFEM", numElements, phiSize);
 
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
@@ -1205,6 +1233,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         matRowPtr,
         matColIdx,
         matValues,
+        phiMFEM_d,
         ax_device,
         ay_device,
         f_device};
@@ -1212,6 +1241,61 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
 
     Kokkos::fence();
   }
+}
+
+/// Implementation of OutputMFEMFine
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
+void
+ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
+    const double* uCoarse, int numEleX, int numEleY) const
+{
+  int const numFineEleX  = ratio * numEleX;
+  int const numFineEleY  = ratio * numEleY;
+  int const numFineNodes = (numFineEleX + 1) * (numFineEleY + 1);
+  int const numCoarseEle = numEleX * numEleY;
+
+  // Create Kokkos::Views for parallel computation on device
+  Kokkos::View<double*, ExecutionSpace> uFine_d("uFine", numFineNodes);
+  Kokkos::View<const double*, ExecutionSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>> uCoarse_d(
+      uCoarse, (numEleX + 1) * (numEleY + 1));
+
+  // Parallel reconstruction over coarse elements on device
+  Kokkos::parallel_for(
+      "MFEM_Reconstruction", Kokkos::RangePolicy<ExecutionSpace>(0, numCoarseEle), KOKKOS_LAMBDA(int eleID) {
+        int const iy = eleID / numEleX;
+        int const ix = eleID % numEleX;
+
+        // Extract coarse DOFs for this element (uTrace)
+        double uTrace[4];
+        uTrace[0] = uCoarse_d(ix + iy * (numEleX + 1));
+        uTrace[1] = uCoarse_d(ix + 1 + iy * (numEleX + 1));
+        uTrace[2] = uCoarse_d(ix + 1 + (iy + 1) * (numEleX + 1));
+        uTrace[3] = uCoarse_d(ix + (iy + 1) * (numEleX + 1));
+
+        // Reconstruct fine nodes for this coarse element using stored phi
+        for (int jy = 0; jy <= ratio; ++jy) {
+          for (int jx = 0; jx <= ratio; ++jx) {
+            int    nodeID = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
+            double uVal   = 0.0;
+            for (int k = 0; k < 4; ++k) {
+              int const phiIdx = jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1);
+              uVal += phiMFEM_d(eleID, phiIdx) * uTrace[k];
+            }
+            uFine_d(nodeID) = uVal;
+          }
+        }
+      });
+  Kokkos::fence();
+
+  // Copy result back to host for file output
+  auto uFine_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), uFine_d);
+
+  // Write to file
+  std::ofstream outFine("outputFine.txt");
+  for (int i = 0; i < numFineNodes; ++i) {
+    outFine << uFine_h(i) << std::endl;
+  }
+  outFine.close();
 }
 
 }  // namespace IMSI

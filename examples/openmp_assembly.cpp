@@ -1,12 +1,15 @@
 ///
-/// @file cuda_assembly.cpp
-/// @brief Example demonstrating CUDA-accelerated FEM assembly
+/// @file openmp_assembly.cpp
+/// @brief Example demonstrating OpenMP-accelerated FEM assembly using ScaledLaplacian
 ///
-/// This example shows how to use the ScaledLaplacian class to assemble
-/// the scaled Laplacian operator on CUDA devices using Kokkos.
+/// This example shows how to use the ScaledLaplacian class with Kokkos::OpenMP
+/// execution space to assemble the scaled Laplacian operator using OpenMP threads.
 ///
 /// Solves: -∇·(α∇u) = f on a 2D rectangular domain
 /// with homogeneous Dirichlet boundary conditions
+///
+/// NOTE: ScaledLaplacian works with any Kokkos execution space including
+///       OpenMP, CUDA, HIP, etc. due to its functor-based design pattern.
 ///
 
 #include <Kokkos_Core.hpp>
@@ -25,7 +28,7 @@ using namespace IMSI;
 
 // Define material coefficients and forcing term as functors at namespace scope
 // These must be KOKKOS_INLINE_FUNCTION compatible for device execution
-// NOTE: Must be at namespace scope for CUDA (cannot be local types in main())
+// NOTE: Must be at namespace scope (cannot be local types in main())
 struct AxFunctor {
   KOKKOS_INLINE_FUNCTION
   double operator()(double x, double y, double z) const { return 1.0; }
@@ -51,17 +54,17 @@ int main(int argc, char* argv[])
 {
   Kokkos::initialize(argc, argv);
   {
-    std::cout << "=== CUDA FEM Assembly Example ===" << std::endl;
-    std::cout << "Kokkos execution space: " << typeid(Kokkos::DefaultExecutionSpace).name() << std::endl;
+    std::cout << "=== OpenMP FEM Assembly Example (using ScaledLaplacian) ===" << std::endl;
+    std::cout << "Kokkos execution space: " << typeid(Kokkos::OpenMP).name() << std::endl;
     std::cout << std::endl;
 
-    // Check if CUDA is available
-#ifdef KOKKOS_ENABLE_CUDA
-    std::cout << "CUDA is enabled" << std::endl;
-    std::cout << "CUDA device count: " << Kokkos::Cuda().concurrency() << " threads" << std::endl;
+    // Check if OpenMP is available
+#ifdef KOKKOS_ENABLE_OPENMP
+    std::cout << "OpenMP is enabled" << std::endl;
+    std::cout << "OpenMP thread count: " << Kokkos::OpenMP().concurrency() << " threads" << std::endl;
 #else
-    std::cerr << "ERROR: This example requires Kokkos with CUDA support" << std::endl;
-    std::cerr << "       Rebuild with -DKokkos_ENABLE_CUDA=ON" << std::endl;
+    std::cerr << "ERROR: This example requires Kokkos with OpenMP support" << std::endl;
+    std::cerr << "       Rebuild with -DKokkos_ENABLE_OPENMP=ON" << std::endl;
     Kokkos::finalize();
     return 1;
 #endif
@@ -75,10 +78,10 @@ int main(int argc, char* argv[])
     // ========================================================================
 
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 8; // 2048
-    dParams.numElePerDir[1] = 8; // 2048
+    dParams.numElePerDir[0] = 64;
+    dParams.numElePerDir[1] = 64;
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::Q1; // MFEM_L
+    dParams.cellType        = IMSI::ElementType::Q1;
 
     std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
               << " Q1 elements" << std::endl;
@@ -101,7 +104,7 @@ int main(int argc, char* argv[])
     }
 
     // ========================================================================
-    // Create sparse matrix structure on host
+    // Create sparse matrix structure
     // ========================================================================
 
     std::cout << "\nAllocating sparse matrix structure..." << std::endl;
@@ -112,64 +115,47 @@ int main(int argc, char* argv[])
     std::cout << "  Matrix size: " << numNodes << " x " << numNodes << std::endl;
     std::cout << "  Non-zeros:   " << numNonZeros << std::endl;
 
-    // Host views
-    Kokkos::View<double*, Kokkos::HostSpace> rhs_h("rhs_host", numNodes);
-    Kokkos::View<size_t*, Kokkos::HostSpace> matRowPtr_h("matRowPtr_host", numNodes + 1);
-    Kokkos::View<int*, Kokkos::HostSpace> matColIdx_h("matColIdx_host", numNonZeros);
-    Kokkos::View<double*, Kokkos::HostSpace> matValues_h("matValues_host", numNonZeros);
+    // OpenMP execution space views (host-accessible)
+    Kokkos::View<double*, Kokkos::OpenMP> rhs("rhs", numNodes);
+    Kokkos::View<size_t*, Kokkos::OpenMP> matRowPtr("matRowPtr", numNodes + 1);
+    Kokkos::View<int*, Kokkos::OpenMP> matColIdx("matColIdx", numNonZeros);
+    Kokkos::View<double*, Kokkos::OpenMP> matValues("matValues", numNonZeros);
 
-    // Copy graph structure from n2n
+    // Copy graph structure from n2n (on host)
     for (size_t i = 0; i <= numNodes; ++i) {
-      matRowPtr_h(i) = meshConn.n2n.row_map(i);
+      matRowPtr(i) = meshConn.n2n.row_map(i);
     }
     for (size_t i = 0; i < numNonZeros; ++i) {
-      matColIdx_h(i) = meshConn.n2n.entries(i);
-      matValues_h(i) = 0.0;
+      matColIdx(i) = meshConn.n2n.entries(i);
+      matValues(i) = 0.0;
     }
 
-    // Device views
-    Kokkos::View<double*, Kokkos::Cuda> rhs_d("rhs_device", numNodes);
-    Kokkos::View<size_t*, Kokkos::Cuda> matRowPtr_d("matRowPtr_device", numNodes + 1);
-    Kokkos::View<int*, Kokkos::Cuda> matColIdx_d("matColIdx_device", numNonZeros);
-    Kokkos::View<double*, Kokkos::Cuda> matValues_d("matValues_device", numNonZeros);
-
-    // Copy structure to device
-    Kokkos::deep_copy(matRowPtr_d, matRowPtr_h);
-    Kokkos::deep_copy(matColIdx_d, matColIdx_h);
-    Kokkos::deep_copy(rhs_d, 0.0);
-    Kokkos::deep_copy(matValues_d, 0.0);
+    // Initialize to zero
+    Kokkos::deep_copy(rhs, 0.0);
 
     // ========================================================================
-    // Assembly on CUDA
+    // Assembly with OpenMP
     // ========================================================================
 
-    std::cout << "\n=== Starting CUDA Assembly ===" << std::endl;
+    std::cout << "\n=== Starting OpenMP Assembly ===" << std::endl;
 
     // Create coefficient functor instances
     AxFunctor ax_func;
     AyFunctor ay_func;
     FFunctor f_func;
 
-    // Instantiate ScaledLaplacian with ExecutionSpace and functor types
-    auto scalarLap = ScaledLaplacian<Kokkos::Cuda, AxFunctor, AyFunctor, FFunctor>(
+    // Instantiate ScaledLaplacian with OpenMP ExecutionSpace and functor types
+    auto scalarLap = ScaledLaplacian<Kokkos::OpenMP, AxFunctor, AyFunctor, FFunctor>(
         meshConn, RuleType::Gauss, 2, ax_func, ay_func, f_func);
 
     Kokkos::Timer timer;
-    scalarLap.GetLinearSystem(rhs_d, matRowPtr_d, matColIdx_d, matValues_d);
+    scalarLap.GetLinearSystem(rhs, matRowPtr, matColIdx, matValues);
     Kokkos::fence();
     double assemblyTime = timer.seconds();
 
     std::cout << "=== Assembly Complete ===" << std::endl;
     std::cout << "Assembly time: " << assemblyTime * 1000.0 << " ms" << std::endl;
     std::cout << std::endl;
-
-    // ========================================================================
-    // Copy results back to host
-    // ========================================================================
-
-    std::cout << "Copying results to host..." << std::endl;
-    Kokkos::deep_copy(rhs_h, rhs_d);
-    Kokkos::deep_copy(matValues_h, matValues_d);
 
     // ========================================================================
     // Apply boundary conditions
@@ -196,12 +182,12 @@ int main(int argc, char* argv[])
     newRowPtr[0] = 0;
     for (size_t i = 0; i < numFreeDofs; ++i) {
       auto gDof = freeToGlobal[i];
-      newRhs[i] = rhs_h(gDof);
-      for (size_t k = matRowPtr_h(gDof); k < matRowPtr_h(gDof + 1); ++k) {
-        auto gCol = matColIdx_h(k);
+      newRhs[i] = rhs(gDof);
+      for (size_t k = matRowPtr(gDof); k < matRowPtr(gDof + 1); ++k) {
+        auto gCol = matColIdx(k);
         if (globalToFree[gCol] != -1) {
           newColIdx.push_back(globalToFree[gCol]);
-          newValues.push_back(matValues_h(k));
+          newValues.push_back(matValues(k));
         }
       }
       newRowPtr[i + 1] = newColIdx.size();
@@ -241,8 +227,8 @@ int main(int argc, char* argv[])
       fullSolution[freeToGlobal[i]] = solution[i];
     }
 
-    OutputToGMSH("cuda_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
-    std::cout << "  Solution written to: cuda_solution.msh" << std::endl;
+    OutputToGMSH("openmp_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+    std::cout << "  Solution written to: openmp_solution.msh" << std::endl;
 
     // ========================================================================
     // Performance summary
