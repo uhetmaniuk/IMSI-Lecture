@@ -2,9 +2,6 @@
 
 #include <iostream>
 
-#include "FunctionExamples.h"
-#include "ScaledLaplacianHost.h"
-
 namespace IMSI {
 
     template<unsigned int dim>

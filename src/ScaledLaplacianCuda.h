@@ -58,6 +58,14 @@ struct MFEMAssemblyFunctor
   Kokkos::View<double*, ExecutionSpace> quadZeta;
   int                                   ruleLen;
 
+  // Global coarse-level RHS (output)
+  Kokkos::View<double*, ExecutionSpace> globalRhs;
+
+  // Global coarse-level stiffness matrix (CSR format, output)
+  Kokkos::View<size_t*, ExecutionSpace> globalMatRowPtr;
+  Kokkos::View<int*, ExecutionSpace>    globalMatColIdx;
+  Kokkos::View<double*, ExecutionSpace> globalMatValues;
+
   // Coefficient functors
   FuncX ax_func;
   FuncY ay_func;
@@ -102,7 +110,9 @@ struct MFEMAssemblyFunctor
     scratch_double_1d phi(teamMember.team_scratch(1), numVectors * numFineNodes);
 
     // Initialize phi to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) { phi(i) = 0.0; });
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) {
+      phi(i) = 0;
+    });
 
     // Initialize rhs to 0, globalToFree to -1 (indicating constrained/boundary DOF)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int i) {
@@ -114,10 +124,10 @@ struct MFEMAssemblyFunctor
     // 8 vectors for static condensation: 4 RHS + 4 solutions (one per basis function)
     constexpr int     numVectors = 4;                                              // Number of coarse element nodes
     scratch_double_1d btmp(teamMember.team_scratch(1), numFreeDofs * numVectors);  // RHS vectors
-    scratch_double_1d utmp(teamMember.team_scratch(1), numFreeDofs * numVectors);  // Solution vectors
+    // Solution vectors - no need to initialize utmp
+    scratch_double_1d utmp(teamMember.team_scratch(1), numFreeDofs * numVectors);
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs * numVectors), [&](int i) {
-      btmp(i) = 0.0;
-      utmp(i) = 0.0;
+      btmp(i) = 0;
     });
 
     // Set a barrier as we will update phi, globalToFree, freeToGlobal, boundaryToGlobal, globalToBoundary
@@ -308,7 +318,9 @@ struct MFEMAssemblyFunctor
     });
 
     // Initialize K_ii matrix values to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_ii), [&](int i) { matValues_ii(i) = 0.0; });
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_ii), [&](int i) {
+      matValues_ii(i) = 0;
+    });
     teamMember.team_barrier();
 
     // Build K_b: CSR matrix for boundary DOFs (numBoundaryDofs x numFineNodes)
@@ -359,29 +371,37 @@ struct MFEMAssemblyFunctor
 
       // Add column indices for all neighbors (in global node numbering)
       if (iy > 0) {
-        if (ix > 0)
+        if (ix > 0) {
           matColIdx_b(offset++) = iGlobal - 1 - (ratio + 1);
+        }
         matColIdx_b(offset++) = iGlobal - (ratio + 1);
-        if (ix < ratio)
+        if (ix < ratio) {
           matColIdx_b(offset++) = iGlobal + 1 - (ratio + 1);
+        }
       }
-      if (ix > 0)
+      if (ix > 0) {
         matColIdx_b(offset++) = iGlobal - 1;
+      }
       matColIdx_b(offset++) = iGlobal;  // Diagonal
-      if (ix < ratio)
+      if (ix < ratio) {
         matColIdx_b(offset++) = iGlobal + 1;
+      }
       if (iy < ratio) {
-        if (ix > 0)
+        if (ix > 0) {
           matColIdx_b(offset++) = iGlobal - 1 + (ratio + 1);
+        }
         matColIdx_b(offset++) = iGlobal + (ratio + 1);
-        if (ix < ratio)
+        if (ix < ratio) {
           matColIdx_b(offset++) = iGlobal + 1 + (ratio + 1);
+        }
       }
     });
     teamMember.team_barrier();
 
     // Initialize K_b matrix values to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_b), [&](int i) { matValues_b(i) = 0.0; });
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_b), [&](int i) {
+      matValues_b(i) = 0;
+    });
     teamMember.team_barrier();
 
     // Get coarse element coordinates from global mesh
@@ -494,7 +514,7 @@ struct MFEMAssemblyFunctor
     // Extract diagonal of K_ii for SSOR preconditioner
     scratch_double_1d diagValues_ii(teamMember.team_scratch(1), numFreeDofs);
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int i) {
-      diagValues_ii(i) = 0.0;
+      diagValues_ii(i) = 0;
       for (int k = matRowPtr_ii(i); k < matRowPtr_ii(i + 1); ++k) {
         if (matColIdx_ii(k) == i) {
           diagValues_ii(i) = matValues_ii(k);
@@ -502,7 +522,6 @@ struct MFEMAssemblyFunctor
         }
       }
     });
-    teamMember.team_barrier();
 
     // Allocate workspace for PCG (4 * numFreeDofs per vector)
     constexpr int     numVectorsToSolve = 3;  // Solve only first 3, get 4th from partition of unity
@@ -511,10 +530,10 @@ struct MFEMAssemblyFunctor
     // Initialize utmp with Q1 basis functions for good initial guess
     // For each interior node, compute parametric coordinates and evaluate Q1 basis
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree) {
-      int const iGlobal  = freeToGlobal(iFree);
-      int const ix       = iGlobal % (ratio + 1);
-      int const iy       = iGlobal / (ratio + 1);
-      double const xi_param  = double(ix) / double(ratio);   // Parametric coords in [0,1]
+      int const    iGlobal   = freeToGlobal(iFree);
+      int const    ix        = iGlobal % (ratio + 1);
+      int const    iy        = iGlobal / (ratio + 1);
+      double const xi_param  = double(ix) / double(ratio);  // Parametric coords in [0,1]
       double const eta_param = double(iy) / double(ratio);
       // Q1 basis functions: N0 = (1-xi)(1-eta), N1 = xi(1-eta), N2 = xi*eta
       utmp(iFree + 0 * numFreeDofs) = (1.0 - xi_param) * (1.0 - eta_param);  // Corner 0
@@ -525,10 +544,10 @@ struct MFEMAssemblyFunctor
 
     // Solve for each of the first 3 basis functions using PCG-SSOR
     // PCG solver is serial, so use Kokkos::single
-    double const omega         = 1.0;   // SSOR relaxation parameter
-    int const    numSSORSweeps = 1;     // Number of SSOR sweeps per preconditioner application
-    double const tol           = 1e-10; // Convergence tolerance
-    int const    maxIter       = 1000;  // Maximum PCG iterations
+    double const omega         = 1.0;    // SSOR relaxation parameter
+    int const    numSSORSweeps = 1;      // Number of SSOR sweeps per preconditioner application
+    double const tol           = 1e-12;  // Convergence tolerance
+    int const    maxIter       = 1000;   // Maximum PCG iterations
 
     Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
       for (int ir = 0; ir < numVectorsToSolve; ++ir) {
@@ -538,14 +557,13 @@ struct MFEMAssemblyFunctor
             &matColIdx_ii(0),
             &matValues_ii(0),
             &diagValues_ii(0),
-            &btmp(ir * numFreeDofs),      // RHS
-            &utmp(ir * numFreeDofs),      // Solution (initialized with Q1 basis)
-            &pcg_work(0),                 // Workspace
+            &btmp(ir * numFreeDofs),  // RHS
+            &utmp(ir * numFreeDofs),  // Solution (initialized with Q1 basis)
+            &pcg_work(0),             // Workspace
             omega,
             numSSORSweeps,
             tol,
             maxIter);
-
         // Optional: could track convergence, but for now we proceed
         // In production code, check if iter == -1 (failure) or iter > maxIter (slow convergence)
       }
@@ -562,35 +580,99 @@ struct MFEMAssemblyFunctor
     });
     teamMember.team_barrier();
 
+    //// UH -> we should be able to merge these two parallel_for because phi(*, 3) is already computed on the boundary.
+
     // Compute 4th basis function using partition of unity: phi[3] = 1 - phi[0] - phi[1] - phi[2]
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int ii) {
-      phi(ii + 3 * numFineNodes) = 1.0 - phi(ii + 0 * numFineNodes)
-                                       - phi(ii + 1 * numFineNodes)
-                                       - phi(ii + 2 * numFineNodes);
+      phi(ii + 3 * numFineNodes) =
+          1.0 - phi(ii + 0 * numFineNodes) - phi(ii + 1 * numFineNodes) - phi(ii + 2 * numFineNodes);
     });
     teamMember.team_barrier();
 
     // ========================================================================
-    // Compute coarse element RHS: rele[ir] = phi[:,ir]^T * rhs
+    // Compute coarse element stiffness matrix: kele = phi^T * Kfine * phi
     // ========================================================================
-    // This requires a reduction, so use parallel_reduce at team level
-    // We'll do this serially for simplicity (could be optimized with team reductions)
+    // Get coarse element ID for later scatter operations
+    int const ieleCoarse_actual = eleList_device(ieleCoarse);
+
+    // Allocate scratch memory for kele (4x4 symmetric matrix)
+    constexpr int     nNodesCoarse_k = 4;  // Q1 coarse element
+    scratch_double_1d kele(teamMember.team_scratch(1), nNodesCoarse_k * nNodesCoarse_k);
+
+    // Initialize kele to zero
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, nNodesCoarse_k * nNodesCoarse_k), [&](int i) {
+      kele(i) = 0;
+    });
+    teamMember.team_barrier();
+
+    // Compute kele = phi^T * Kfine * phi
+    //
+    // kele = phi^T [[Kii phi_i + Kib phi_b]; [Kbi phi_i + Kbb phi_b]]
+    // kele = phi^T [[0]; [Kbi phi_i + Kbb phi_b]]
+    // kele = phi_b^T ( Kbi phi_i + Kbb phi_b )
+    // kele = phi_b^T ( Kbb phi_b - Kbi Kii^{-1} Kib phi_b ) -> Schur complement
+    //
+
+    // Contribution from K_b (boundary-all coupling)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numBoundaryDofs), [&](int iBoundary) {
+      int const iGlobal  = boundaryToGlobal(iBoundary);
+      int const rowBegin = matRowPtr_b(iBoundary);
+      int const rowEnd   = matRowPtr_b(iBoundary + 1);
+
+      for (int k = rowBegin; k < rowEnd; ++k) {
+        int const    jGlobal = matColIdx_b(k);  // K_b uses global node numbering for columns
+        double const k_val   = matValues_b(k);
+
+        // Accumulate contribution to kele for all basis function pairs
+        for (int ir = 0; ir < numVectors; ++ir) {
+          double const phi_i = phi(iGlobal + ir * numFineNodes);
+          for (int jr = 0; jr < numVectors; ++jr) {
+            double const phi_j = phi(jGlobal + jr * numFineNodes);
+            Kokkos::atomic_add(&kele(ir + jr * nNodesCoarse_k), phi_i * k_val * phi_j);
+          }
+        }
+      }
+    });
+    teamMember.team_barrier();
+
+    // ========================================================================
+    // Scatter-add kele into global coarse stiffness matrix
+    // ========================================================================
     Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
-      // Get coarse element coordinates for output
-      int const     eleID        = eleList_device(teamMember.league_rank());
-      constexpr int nNodesCoarse = 4;
+      for (int ir = 0; ir < numVectors; ++ir) {
+        int const iCoarseNode = cellToNode(ieleCoarse_actual, ir);
+        int const rowBegin    = globalMatRowPtr(iCoarseNode);
+        int const rowEnd      = globalMatRowPtr(iCoarseNode + 1);
 
-      // Compute rele = phi^T * rhs for all 4 basis functions
-      // Note: This computation requires access to global rhs/matValues views
-      // For now, we'll defer this to a separate pass or accept that this functor
-      // is incomplete without global views being passed in
-
-      // TODO: Scatter coarse element contributions to global matrix
-      // This requires global rhs/matRowPtr/matColIdx/matValues views to be passed
-      // to the functor and accessible here
+        for (int jr = 0; jr < numVectors; ++jr) {
+          int const jCoarseNode = cellToNode(ieleCoarse_actual, jr);
+          // Binary search for column position in global matrix
+          int const pos = lower_bound_device(&globalMatColIdx(rowBegin), rowEnd - rowBegin, jCoarseNode);
+          Kokkos::atomic_add(&globalMatValues(rowBegin + pos), kele(ir + jr * nNodesCoarse_k));
+        }
+      }
     });
 
-    teamMember.team_barrier();
+    // ========================================================================
+    // Compute coarse element RHS and scatter-add into global RHS
+    // rele[ir] = phi[:,ir]^T * rhs_fine, then add to globalRhs
+    // ========================================================================
+
+    // Compute each component using team-level parallel reduction and scatter-add directly
+    for (int ir = 0; ir < numVectors; ++ir) {
+      double sum = 0;
+      Kokkos::parallel_reduce(
+          Kokkos::TeamThreadRange(teamMember, numFineNodes),
+          [&](int ii, double& local_sum) {
+            local_sum += phi(ii + ir * numFineNodes) * rhs(ii);
+          },
+          sum);
+      // Directly scatter-add into global coarse RHS
+      Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+        int const coarseNode = cellToNode(ieleCoarse_actual, ir);
+        Kokkos::atomic_add(&globalRhs(coarseNode), sum);
+      });
+    }
   }
 };
 
@@ -768,7 +850,6 @@ class ScaledLaplacianCuda
   }
 
  protected:
-
   /// \brief Device kernel for Q1 element assembly
   ///
   /// Computes element stiffness matrix and RHS for a single Q1 element
@@ -1064,6 +1145,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     // 8 double vectors for static condensation: 4 RHS (btmp) + 4 solutions (utmp)
     // 1 double vector: diagValues_ii (diagonal of K_ii for SSOR)
     // 1 double vector: pcg_work (workspace for PCG solver, size 4*numFreeDofs)
+    // 1 double matrix: kele (coarse element stiffness matrix, 4x4 = 16 values)
     // Note: We must allocate maxNnz_ii and maxNnz_b here since scratch size must be known at compile time.
     constexpr int numFreeDofs         = (functor_t::ratio - 1) * (functor_t::ratio - 1);
     constexpr int numBoundaryDofs     = numFineNodes - numFreeDofs;  // 128 for ratio=32
@@ -1072,6 +1154,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     constexpr int maxNnz_ii           = numFreeDofs * maxNnzPerRow_ii;
     constexpr int maxNnzPerRow_b      = 9;  // Max neighbors for boundary node
     constexpr int maxNnz_b            = numBoundaryDofs * maxNnzPerRow_b;
+    constexpr int nNodesCoarse        = 4;                                                   // Q1 coarse element
     size_t        scratch_size_level1 = scratch_double_1d::shmem_size(numFineNodes) +        // rhs
                                  scratch_double_1d::shmem_size(numFineNodes) +               // solution
                                  scratch_int_1d::shmem_size(numFineNodes) +                  // globalToFree
@@ -1085,10 +1168,11 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
                                  scratch_int_1d::shmem_size(numBoundaryDofs + 1) +  // matRowPtr_b
                                  scratch_int_1d::shmem_size(maxNnz_b) +     // matColIdx_b (conservative upper bound)
                                  scratch_double_1d::shmem_size(maxNnz_b) +  // matValues_b (conservative upper bound)
-                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +  // btmp (RHS vectors)
-                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +  // utmp (solution vectors)
-                                 scratch_double_1d::shmem_size(numFreeDofs) +               // diagValues_ii
-                                 scratch_double_1d::shmem_size(4 * numFreeDofs);            // pcg_work
+                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // btmp (RHS vectors)
+                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // utmp (solution vectors)
+                                 scratch_double_1d::shmem_size(numFreeDofs) +                 // diagValues_ii
+                                 scratch_double_1d::shmem_size(4 * numFreeDofs) +             // pcg_work
+                                 scratch_double_1d::shmem_size(nNodesCoarse * nNodesCoarse);  // kele
 
     // Create TeamPolicy with scratch memory
     Kokkos::TeamPolicy<ExecutionSpace> team_policy(numEle, Kokkos::AUTO);
@@ -1106,6 +1190,10 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         quadEta_local,
         quadZeta_local,
         ruleLen,
+        rhs,
+        matRowPtr,
+        matColIdx,
+        matValues,
         ax_device,
         ay_device,
         f_device};
