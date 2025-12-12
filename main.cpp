@@ -36,8 +36,8 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 96; // 2048
-    dParams.numElePerDir[1] = 96; // 2048
+    dParams.numElePerDir[0] = 16; // 2048
+    dParams.numElePerDir[1] = 16; // 2048
     dParams.omega           = IMSI::DomainType::Rectangle;
     dParams.cellType        = IMSI::ElementType::MFEM_L;
     //
@@ -72,15 +72,15 @@ main(int argc, char* argv[])
     IMSI::ScaledLaplacianHost dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
     if (useColoring) {
       if ((useSIMD) && (dParams.cellType != IMSI::ElementType::MFEM_L)) {
-        dataAssembly.GetLinearSystem_v<host_execution_space, true>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, true>(rhsValues, matRowPtr, matColIdx, matValues);
       } else {
-        dataAssembly.GetLinearSystem_v<host_execution_space, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, false>(rhsValues, matRowPtr, matColIdx, matValues);
       }
     } else {
       if ((useSIMD) && (dParams.cellType != IMSI::ElementType::MFEM_L)) {
-        dataAssembly.GetLinearSystem_v<host_execution_space, true, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, true, false>(rhsValues, matRowPtr, matColIdx, matValues);
       } else {
-        dataAssembly.GetLinearSystem_v<host_execution_space, false, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, false, false>(rhsValues, matRowPtr, matColIdx, matValues);
       }
     }
     end = std::chrono::high_resolution_clock::now();

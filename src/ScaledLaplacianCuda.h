@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include <optional>
 
 #include "../main_config.h"
 #include "Element.h"
@@ -11,9 +10,7 @@
 #include "PCG_Solver.h"
 #include "QuadratureRule.h"
 #include "SparseMatrix.hpp"
-#include "SymmetricSparse.hpp"
-#include "fe2DQ1.h"  // For host-side MFEM assembly
-#include "fe2DQ1Cuda.h"
+#include "fe2DQ1Cuda.h" // Named with Cuda but it does not depend on the device
 
 namespace IMSI {
 
@@ -75,10 +72,11 @@ struct MFEMAssemblyFunctor
   static int constexpr numFineNodes = (ratio + 1) * (ratio + 1);
   static int constexpr numFineEle   = ratio * ratio;
 
-  typedef typename Kokkos::TeamPolicy<ExecutionSpace>::member_type                      team_member;
-  typedef typename ExecutionSpace::scratch_memory_space                                 scratch_space;
-  typedef Kokkos::View<int*, scratch_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>>    scratch_int_1d;
-  typedef Kokkos::View<double*, scratch_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>> scratch_double_1d;
+  typedef typename Kokkos::TeamPolicy<ExecutionSpace>::member_type                   team_member;
+  typedef typename ExecutionSpace::scratch_memory_space                              scratch_space;
+  typedef Kokkos::View<int*, scratch_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>> scratch_int_1d;
+  typedef Kokkos::View<double*, scratch_space, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+      scratch_double_1d;
 
   KOKKOS_FUNCTION
   void
@@ -110,9 +108,10 @@ struct MFEMAssemblyFunctor
     scratch_double_1d phi(teamMember.team_scratch(1), numVectors * numFineNodes);
 
     // Initialize phi to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) {
-      phi(i) = 0;
-    });
+    Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int i) {
+          phi(i) = 0;
+        });
 
     // Initialize rhs to 0, globalToFree to -1 (indicating constrained/boundary DOF)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineNodes), [&](int i) {
@@ -122,7 +121,7 @@ struct MFEMAssemblyFunctor
     });
 
     // 8 vectors for static condensation: 4 RHS + 4 solutions (one per basis function)
-    constexpr int     numVectors = 4;                                              // Number of coarse element nodes
+    constexpr int     numVectors = 4;  // Number of coarse element nodes
     scratch_double_1d btmp(teamMember.team_scratch(1), numFreeDofs * numVectors);  // RHS vectors
     // Solution vectors - no need to initialize utmp
     scratch_double_1d utmp(teamMember.team_scratch(1), numFreeDofs * numVectors);
@@ -130,7 +129,8 @@ struct MFEMAssemblyFunctor
       btmp(i) = 0;
     });
 
-    // Set a barrier as we will update phi, globalToFree, freeToGlobal, boundaryToGlobal, globalToBoundary
+    // Set a barrier as we will update phi, globalToFree, freeToGlobal, boundaryToGlobal,
+    // globalToBoundary
     teamMember.team_barrier();
 
     // Build DOF mappings and corner basis functions (serial operations)
@@ -202,40 +202,41 @@ struct MFEMAssemblyFunctor
 
     // Get the sparsity graph of K_ii (interior-interior stiffness matrix)
     // Map from free DOF index to sparsity pattern
-    Kokkos::parallel_scan(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree, int& update, bool final) {
-      int const iGlobal = freeToGlobal(iFree);
-      int const ix      = iGlobal % (ratio + 1);
-      int const iy      = iGlobal / (ratio + 1);
+    Kokkos::parallel_scan(
+        Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree, int& update, bool final) {
+          int const iGlobal = freeToGlobal(iFree);
+          int const ix      = iGlobal % (ratio + 1);
+          int const iy      = iGlobal / (ratio + 1);
 
-      // Count interior neighbors only
-      int       count    = 1;  // Diagonal
-      int const hasWest  = (ix > 1);
-      int const hasEast  = (ix < ratio - 1);
-      int const hasSouth = (iy > 1);
-      int const hasNorth = (iy < ratio - 1);
+          // Count interior neighbors only
+          int       count    = 1;  // Diagonal
+          int const hasWest  = (ix > 1);
+          int const hasEast  = (ix < ratio - 1);
+          int const hasSouth = (iy > 1);
+          int const hasNorth = (iy < ratio - 1);
 
-      // South neighbors (iy - 1 row)
-      if (hasSouth) {
-        count += hasWest;  // SW
-        count++;           // S (always present when hasSouth)
-        count += hasEast;  // SE
-      }
-      // Center row neighbors
-      count += hasWest + hasEast;  // W and E
-      // North neighbors (iy + 1 row)
-      if (hasNorth) {
-        count += hasWest;  // NW
-        count++;           // N (always present when hasNorth)
-        count += hasEast;  // NE
-      }
+          // South neighbors (iy - 1 row)
+          if (hasSouth) {
+            count += hasWest;  // SW
+            count++;           // S (always present when hasSouth)
+            count += hasEast;  // SE
+          }
+          // Center row neighbors
+          count += hasWest + hasEast;  // W and E
+          // North neighbors (iy + 1 row)
+          if (hasNorth) {
+            count += hasWest;  // NW
+            count++;           // N (always present when hasNorth)
+            count += hasEast;  // NE
+          }
 
-      if (final) {
-        matRowPtr_ii(iFree) = update;
-        if (iFree == numFreeDofs - 1)
-          matRowPtr_ii(numFreeDofs) = update + count;
-      }
-      update += count;
-    });
+          if (final) {
+            matRowPtr_ii(iFree) = update;
+            if (iFree == numFreeDofs - 1)
+              matRowPtr_ii(numFreeDofs) = update + count;
+          }
+          update += count;
+        });
     teamMember.team_barrier();
 
     // Now allocate colIdx and values for K_ii with the exact number of non-zeros
@@ -330,7 +331,8 @@ struct MFEMAssemblyFunctor
 
     // Get the sparsity graph of K_b (boundary rows, all columns)
     Kokkos::parallel_scan(
-        Kokkos::TeamThreadRange(teamMember, numBoundaryDofs), [&](int iBoundary, int& update, bool final) {
+        Kokkos::TeamThreadRange(teamMember, numBoundaryDofs),
+        [&](int iBoundary, int& update, bool final) {
           int const iGlobal = boundaryToGlobal(iBoundary);
           int const ix      = iGlobal % (ratio + 1);
           int const iy      = iGlobal / (ratio + 1);
@@ -484,7 +486,7 @@ struct MFEMAssemblyFunctor
               // Interior-interior coupling: add to K_ii
               int const rowBegin = matRowPtr_ii(iFree);
               int const rowEnd   = matRowPtr_ii(iFree + 1);
-              int const pos      = lower_bound_device(&matColIdx_ii(rowBegin), rowEnd - rowBegin, jFree);
+              int const pos = lower_bound_device(&matColIdx_ii(rowBegin), rowEnd - rowBegin, jFree);
               Kokkos::atomic_add(&matValues_ii(rowBegin + pos), k_val);
             } else {
               // Interior-boundary coupling: add to btmp (RHS for static condensation)
@@ -498,7 +500,7 @@ struct MFEMAssemblyFunctor
             int const iBoundary = globalToBoundary(iGlobal);
             int const rowBegin  = matRowPtr_b(iBoundary);
             int const rowEnd    = matRowPtr_b(iBoundary + 1);
-            int const pos       = lower_bound_device(&matColIdx_b(rowBegin), rowEnd - rowBegin, jGlobal);
+            int const pos = lower_bound_device(&matColIdx_b(rowBegin), rowEnd - rowBegin, jGlobal);
             Kokkos::atomic_add(&matValues_b(rowBegin + pos), k_val);
           }
         }
@@ -574,7 +576,7 @@ struct MFEMAssemblyFunctor
     // Phi was initialized with boundary basis functions; now add interior solution
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree) {
       int const iGlobal = freeToGlobal(iFree);
-      double sum = 0;
+      double    sum     = 0;
       for (int ir = 0; ir < numVectorsToSolve; ++ir) {
         phi(iGlobal + ir * numFineNodes) = utmp(iFree + ir * numFreeDofs);
         sum += utmp(iFree + ir * numFreeDofs);
@@ -594,9 +596,10 @@ struct MFEMAssemblyFunctor
     scratch_double_1d kele(teamMember.team_scratch(1), nNodesCoarse_k * nNodesCoarse_k);
 
     // Initialize kele to zero
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, nNodesCoarse_k * nNodesCoarse_k), [&](int i) {
-      kele(i) = 0;
-    });
+    Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(teamMember, nNodesCoarse_k * nNodesCoarse_k), [&](int i) {
+          kele(i) = 0;
+        });
     teamMember.team_barrier();
 
     // Compute kele = phi^T * Kfine * phi
@@ -640,7 +643,8 @@ struct MFEMAssemblyFunctor
         for (int jr = 0; jr < numVectors; ++jr) {
           int const jCoarseNode = cellToNode(ieleCoarse_actual, jr);
           // Binary search for column position in global matrix
-          int const pos = lower_bound_device(&globalMatColIdx(rowBegin), rowEnd - rowBegin, jCoarseNode);
+          int const pos =
+              lower_bound_device(&globalMatColIdx(rowBegin), rowEnd - rowBegin, jCoarseNode);
           Kokkos::atomic_add(&globalMatValues(rowBegin + pos), kele(ir + jr * nNodesCoarse_k));
         }
       }
@@ -698,13 +702,20 @@ class ScaledLaplacianCuda
       FuncX                     ax_in,
       FuncY                     ay_in,
       FuncF                     f_in)
-      : meshInfo(meshData), ruleType(quadRule), ruleOrder(quadOrder), ax_func(ax_in), ay_func(ay_in), f_func(f_in)
+      : meshInfo(meshData),
+        ruleType(quadRule),
+        ruleOrder(quadOrder),
+        ax_func(ax_in),
+        ay_func(ay_in),
+        f_func(f_in)
   {
     auto const sdim = meshInfo.mesh.GetSpatialDimension();
     if (sdim != 2) {
       throw std::runtime_error("ScaledLaplacianCuda is only implemented for 2D problems");
     }
 
+    std::vector<double> weight;
+    std::vector<double> xi, eta, zeta;
     getQuadrature(ruleType, sdim, ruleOrder, ruleLength, weight, xi, eta, zeta);
 
     // Copy quadrature data to device
@@ -767,9 +778,6 @@ class ScaledLaplacianCuda
   int      ruleOrder  = 1;
   int      ruleLength = 0;
 
-  std::vector<double> weight;
-  std::vector<double> xi, eta, zeta;
-
   // Device copies of quadrature data
   Kokkos::View<double*, ExecutionSpace> quadWeight_d;
   Kokkos::View<double*, ExecutionSpace> quadXi_d;
@@ -802,9 +810,10 @@ class ScaledLaplacianCuda
     {
       auto  cellTypes_h   = Kokkos::create_mirror_view(data.cellTypes);
       auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
-      Kokkos::parallel_for("CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
-        cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
-      });
+      Kokkos::parallel_for(
+          "CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
+            cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+          });
       Kokkos::deep_copy(data.cellTypes, cellTypes_h);
     }
 
@@ -814,7 +823,9 @@ class ScaledLaplacianCuda
       auto  nodeCoords_h = Kokkos::create_mirror_view(data.nodeCoords);
       auto& mesh_ref     = meshInfo.mesh;
       Kokkos::parallel_for(
-          "NodeCoords_Copy", Kokkos::RangePolicy<HostSpace>(0, numNodes), [=, &mesh_ref](const int in) {
+          "NodeCoords_Copy",
+          Kokkos::RangePolicy<HostSpace>(0, numNodes),
+          [=, &mesh_ref](const int in) {
             auto const vertex = mesh_ref.GetVertex(in);
             for (int d = 0; d < sdim; ++d) {
               nodeCoords_h(in * sdim + d) = vertex[d];
@@ -824,12 +835,15 @@ class ScaledLaplacianCuda
     }
 
     // Copy cell-to-node connectivity
-    data.cellToNode = Kokkos::View<int**, ExecutionSpace>("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+    data.cellToNode =
+        Kokkos::View<int**, ExecutionSpace>("cellToNode", numCells, 4);  // Q1 has 4 nodes max
     {
       auto  cellToNode_h = Kokkos::create_mirror_view(data.cellToNode);
       auto& mesh_ref     = meshInfo.mesh;
       Kokkos::parallel_for(
-          "CellToNodes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=, &mesh_ref](const int ic) {
+          "CellToNodes_Copy",
+          Kokkos::RangePolicy<HostSpace>(0, numCells),
+          [=, &mesh_ref](const int ic) {
             auto const& nodeList = mesh_ref.NodeList(ic);
             auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
             for (int in = 0; in < nodeList.size() && in < 4; ++in) {
@@ -865,8 +879,11 @@ class ScaledLaplacianCuda
       Scalar* __restrict__ kele   // Element stiffness [16 values]
   )
   {
+    /// TODO Could we generalize the routine by introducing ElementType as template parameter
+    using ElementType = fe2DQ1Cuda;
+
     constexpr int dim    = 2;
-    constexpr int nNodes = fe2DQ1Cuda::numNode;
+    constexpr int nNodes = ElementType::numNode;
 
     // Initialize output arrays
     for (int i = 0; i < nNodes; ++i) {
@@ -883,7 +900,7 @@ class ScaledLaplacianCuda
 
     // Quadrature loop
     for (int iq = 0; iq < ruleLen; ++iq) {
-      fe2DQ1Cuda::GetValuesGradients(quadXi[iq], quadEta[iq], quadZeta[iq], NandGradN);
+      ElementType::GetValuesGradients(quadXi[iq], quadEta[iq], quadZeta[iq], NandGradN);
 
       // Compute Jacobian: pointJac = [x, y, dx/dxi, dy/dxi, dx/deta, dy/deta]
       for (int jd = 0; jd <= dim; ++jd) {
@@ -969,7 +986,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
   printf("Number of colors: %d\n", c2e.numRows());
 
   // Copy mesh data to device
-  auto meshData = CopyMeshToDevice();
+  auto meshData_d = CopyMeshToDevice();
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -993,19 +1010,22 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
     {
-      auto eleList_h = Kokkos::subview(c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
+      auto eleList_h = Kokkos::subview(
+          c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
       Kokkos::deep_copy(eleList_d, eleList_h);
     }
 
     // Capture device views for lambda
-    auto cellTypes      = meshData.cellTypes;
-    auto nodeCoords     = meshData.nodeCoords;
-    auto cellToNode     = meshData.cellToNode;
+    auto cellTypes      = meshData_d.cellTypes;
+    auto nodeCoords     = meshData_d.nodeCoords;
+    auto cellToNode     = meshData_d.cellToNode;
     auto eleList_device = eleList_d;
 
     // Parallel assembly for this color (no conflicts within same color)
     Kokkos::parallel_for(
-        "Q1Assembly_Color", Kokkos::RangePolicy<ExecutionSpace>(0, numEle), KOKKOS_LAMBDA(const int ik) {
+        "Q1Assembly_Color",
+        Kokkos::RangePolicy<ExecutionSpace>(0, numEle),
+        KOKKOS_LAMBDA(const int ik) {
           auto const eleID = eleList_device(ik);
 
           // Only handle Q1 elements for now
@@ -1085,7 +1105,7 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   printf("Number of colors: %d\n", c2e.numRows());
 
   // Copy mesh data to device
-  auto meshData = CopyMeshToDevice();
+  auto meshData_d = CopyMeshToDevice();
 
   // Capture quadrature data for device
   auto quadWeight_local = quadWeight_d;
@@ -1109,14 +1129,15 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
     {
-      auto eleList_h = Kokkos::subview(c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
+      auto eleList_h = Kokkos::subview(
+          c2e.entries, Kokkos::make_pair(c2e.row_map(ic), c2e.row_map(ic) + numEle));
       Kokkos::deep_copy(eleList_d, eleList_h);
     }
 
     // Capture device views for lambda
-    auto cellTypes      = meshData.cellTypes;
-    auto nodeCoords     = meshData.nodeCoords;
-    auto cellToNode     = meshData.cellToNode;
+    auto cellTypes      = meshData_d.cellTypes;
+    auto nodeCoords     = meshData_d.nodeCoords;
+    auto cellToNode     = meshData_d.cellToNode;
     auto eleList_device = eleList_d;
 
     // Calculate scratch memory requirements
@@ -1125,46 +1146,44 @@ ScaledLaplacianCuda<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     using scratch_double_1d = typename functor_t::scratch_double_1d;
 
     constexpr int numFineNodes = functor_t::numFineNodes;
-    constexpr int maxNnzPerRow = 9;
-    constexpr int maxNnz       = numFineNodes * maxNnzPerRow;
 
     // Scratch memory size calculation (level 1):
     // 2 double vectors: rhs, solution (for full fine system)
-    // 4 int vectors for DOF mappings: globalToFree, freeToGlobal, globalToBoundary, boundaryToGlobal
-    // 1 double matrix: phi (numVectors x numFineNodes)
-    // 3 K_ii sparse matrix components: matRowPtr_ii, matColIdx_ii, matValues_ii
-    // 3 K_b sparse matrix components: matRowPtr_b, matColIdx_b, matValues_b
-    // 8 double vectors for static condensation: 4 RHS (btmp) + 4 solutions (utmp)
-    // 1 double vector: diagValues_ii (diagonal of K_ii for SSOR)
-    // 1 double vector: pcg_work (workspace for PCG solver, size 4*numFreeDofs)
-    // 1 double matrix: kele (coarse element stiffness matrix, 4x4 = 16 values)
-    // Note: We must allocate maxNnz_ii and maxNnz_b here since scratch size must be known at compile time.
-    constexpr int numFreeDofs         = (functor_t::ratio - 1) * (functor_t::ratio - 1);
-    constexpr int numBoundaryDofs     = numFineNodes - numFreeDofs;  // 128 for ratio=32
-    constexpr int numVectors          = 4;                           // Number of coarse element nodes
-    constexpr int maxNnzPerRow_ii     = 9;  // Max neighbors for interior node (including diagonal)
-    constexpr int maxNnz_ii           = numFreeDofs * maxNnzPerRow_ii;
-    constexpr int maxNnzPerRow_b      = 9;  // Max neighbors for boundary node
-    constexpr int maxNnz_b            = numBoundaryDofs * maxNnzPerRow_b;
-    constexpr int nNodesCoarse        = 4;                                                   // Q1 coarse element
-    size_t        scratch_size_level1 = scratch_double_1d::shmem_size(numFineNodes) +        // rhs
-                                 scratch_double_1d::shmem_size(numFineNodes) +               // solution
-                                 scratch_int_1d::shmem_size(numFineNodes) +                  // globalToFree
-                                 scratch_int_1d::shmem_size(numFreeDofs) +                   // freeToGlobal
-                                 scratch_int_1d::shmem_size(numFineNodes) +                  // globalToBoundary
-                                 scratch_int_1d::shmem_size(numBoundaryDofs) +               // boundaryToGlobal
-                                 scratch_double_1d::shmem_size(numVectors * numFineNodes) +  // phi
-                                 scratch_int_1d::shmem_size(numFreeDofs + 1) +               // matRowPtr_ii
-                                 scratch_int_1d::shmem_size(maxNnz_ii) +     // matColIdx_ii (conservative upper bound)
-                                 scratch_double_1d::shmem_size(maxNnz_ii) +  // matValues_ii (conservative upper bound)
-                                 scratch_int_1d::shmem_size(numBoundaryDofs + 1) +  // matRowPtr_b
-                                 scratch_int_1d::shmem_size(maxNnz_b) +     // matColIdx_b (conservative upper bound)
-                                 scratch_double_1d::shmem_size(maxNnz_b) +  // matValues_b (conservative upper bound)
-                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // btmp (RHS vectors)
-                                 scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // utmp (solution vectors)
-                                 scratch_double_1d::shmem_size(numFreeDofs) +                 // diagValues_ii
-                                 scratch_double_1d::shmem_size(4 * numFreeDofs) +             // pcg_work
-                                 scratch_double_1d::shmem_size(nNodesCoarse * nNodesCoarse);  // kele
+    // 4 int vectors for DOF mappings: globalToFree, freeToGlobal, globalToBoundary,
+    // boundaryToGlobal 1 double matrix: phi (numVectors x numFineNodes) 3 K_ii sparse matrix
+    // components: matRowPtr_ii, matColIdx_ii, matValues_ii 3 K_b sparse matrix components:
+    // matRowPtr_b, matColIdx_b, matValues_b 8 double vectors for static condensation: 4 RHS (btmp)
+    // + 4 solutions (utmp) 1 double vector: diagValues_ii (diagonal of K_ii for SSOR) 1 double
+    // vector: pcg_work (workspace for PCG solver, size 4*numFreeDofs) 1 double matrix: kele (coarse
+    // element stiffness matrix, 4x4 = 16 values) Note: We must allocate maxNnz_ii and maxNnz_b here
+    // since scratch size must be known at compile time.
+    constexpr int numFreeDofs     = (functor_t::ratio - 1) * (functor_t::ratio - 1);
+    constexpr int numBoundaryDofs = numFineNodes - numFreeDofs;  // 128 for ratio=32
+    constexpr int numVectors      = 4;                           // Number of coarse element nodes
+    constexpr int maxNnzPerRow_ii = 9;  // Max neighbors for interior node (including diagonal)
+    constexpr int maxNnz_ii       = numFreeDofs * maxNnzPerRow_ii;
+    constexpr int maxNnzPerRow_b  = 9;  // Max neighbors for boundary node
+    constexpr int maxNnz_b        = numBoundaryDofs * maxNnzPerRow_b;
+    constexpr int nNodesCoarse    = 4;  // Q1 coarse element
+    size_t        scratch_size_level1 =
+        scratch_double_1d::shmem_size(numFineNodes) +               // rhs
+        scratch_double_1d::shmem_size(numFineNodes) +               // solution
+        scratch_int_1d::shmem_size(numFineNodes) +                  // globalToFree
+        scratch_int_1d::shmem_size(numFreeDofs) +                   // freeToGlobal
+        scratch_int_1d::shmem_size(numFineNodes) +                  // globalToBoundary
+        scratch_int_1d::shmem_size(numBoundaryDofs) +               // boundaryToGlobal
+        scratch_double_1d::shmem_size(numVectors * numFineNodes) +  // phi
+        scratch_int_1d::shmem_size(numFreeDofs + 1) +               // matRowPtr_ii
+        scratch_int_1d::shmem_size(maxNnz_ii) +     // matColIdx_ii (conservative upper bound)
+        scratch_double_1d::shmem_size(maxNnz_ii) +  // matValues_ii (conservative upper bound)
+        scratch_int_1d::shmem_size(numBoundaryDofs + 1) +  // matRowPtr_b
+        scratch_int_1d::shmem_size(maxNnz_b) +             // matColIdx_b (conservative upper bound)
+        scratch_double_1d::shmem_size(maxNnz_b) +          // matValues_b (conservative upper bound)
+        scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // btmp (RHS vectors)
+        scratch_double_1d::shmem_size(numFreeDofs * numVectors) +    // utmp (solution vectors)
+        scratch_double_1d::shmem_size(numFreeDofs) +                 // diagValues_ii
+        scratch_double_1d::shmem_size(4 * numFreeDofs) +             // pcg_work
+        scratch_double_1d::shmem_size(nNodesCoarse * nNodesCoarse);  // kele
 
     // Create TeamPolicy with scratch memory
     Kokkos::TeamPolicy<ExecutionSpace> team_policy(numEle, Kokkos::AUTO);

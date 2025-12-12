@@ -44,7 +44,7 @@ class ScaledLaplacianHost
 
   template <typename Device, bool useSIMD, bool useColoring = true>
   void
-  GetLinearSystem_v(
+  GetLinearSystem(
       Kokkos::View<double*, Device> rhs,
       Kokkos::View<size_t*, Device> matRowPtr,
       Kokkos::View<int*, Device>    matColIdx,
@@ -633,7 +633,7 @@ namespace IMSI {
 
 template <typename Device, bool useSIMD, bool useColoring>
 void
-ScaledLaplacianHost::GetLinearSystem_v(
+ScaledLaplacianHost::GetLinearSystem(
     Kokkos::View<double*, Device> rhs,
     Kokkos::View<size_t*, Device> matRowPtr,
     Kokkos::View<int*, Device>    matColIdx,
