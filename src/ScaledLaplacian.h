@@ -10,7 +10,7 @@
 #include "PCG_Solver.h"
 #include "QuadratureRule.h"
 #include "SparseMatrix.hpp"
-#include "fe2DQ1Cuda.h"  // Named with Cuda but it does not depend on the device
+#include "fe2DQ1.h"
 
 namespace IMSI {
 
@@ -1054,7 +1054,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
             return;  // Skip non-Q1 elements
           }
 
-          constexpr int nNodes = fe2DQ1Cuda::numNode;
+          constexpr int nNodes = fe2DQ1::numNode;
           constexpr int dim    = 2;
 
           // Get locally element node indices and coordinates

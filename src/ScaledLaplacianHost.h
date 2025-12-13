@@ -151,6 +151,7 @@ class ScaledLaplacianHost
     std::array<Scalar, dim*(dim + 1)> pointJac;
     std::array<Scalar, dim>           alpha;
     std::array<Scalar, nNodes * dim>  GradPhi;
+    std::array<Scalar, nNodes * (dim + 1)> NandGradN;
     //
     bool has_ax = ax.has_value();
     bool has_ay = ay.has_value();
@@ -158,7 +159,7 @@ class ScaledLaplacianHost
     bool has_f  = f.has_value();
     //
     for (int iq = 0; iq < ruleLength; ++iq) {
-      auto NandGradN = element.GetValuesGradients(Scalar(xi[iq]), Scalar(eta[iq]), Scalar(zeta[iq]));
+      element.GetValuesGradients(Scalar(xi[iq]), Scalar(eta[iq]), Scalar(zeta[iq]), &NandGradN[0]);
       for (int jd = 0; jd <= dim; ++jd) {
         for (int id = 0; id < dim; ++id) {
           Scalar jacEntry{0};
