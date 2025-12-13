@@ -1,7 +1,6 @@
 #pragma once
 
 #include <fstream>
-#include <functional>
 
 #include "../main_config.h"
 #include "Element.h"
@@ -11,7 +10,7 @@
 #include "PCG_Solver.h"
 #include "QuadratureRule.h"
 #include "SparseMatrix.hpp"
-#include "fe2DQ1Cuda.h" // Named with Cuda but it does not depend on the device
+#include "fe2DQ1Cuda.h"  // Named with Cuda but it does not depend on the device
 
 namespace IMSI {
 
@@ -33,6 +32,306 @@ lower_bound_device(const T* array, int size, T value)
   }
   return left;
 }
+
+/// \brief CUDA ScaledLaplacian class for 2D problems
+///
+/// This class provides CUDA-accelerated assembly for the scaled Laplacian operator:
+///   -∇·(α∇u) = f
+///
+/// Supported elements:
+///   - Q1 (bilinear quadrilateral) in 2D
+///   - MFEM_L (Multiscale FEM with static condensation) in 2D
+///
+/// Note: Q2, 1D, and 3D cases are not implemented (per user requirements)
+///
+/// Template parameters:
+///   - ExecutionSpace: Kokkos execution space (e.g., Kokkos::Cuda, Kokkos::OpenMP)
+///   - FuncX, FuncY, FuncF: Functor types for coefficients ax, ay, and f
+///     Each must have operator()(double x, double y, double z) marked KOKKOS_INLINE_FUNCTION
+///
+template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
+class ScaledLaplacian
+{
+ public:
+  using HostSpace = Kokkos::DefaultHostExecutionSpace;
+
+  ScaledLaplacian(
+      const MeshConnectivity<>& meshData,
+      RuleType                  quadRule,
+      int                       quadOrder,
+      FuncX                     ax_in,
+      FuncY                     ay_in,
+      FuncF                     f_in)
+      : meshInfo(meshData),
+        ruleType(quadRule),
+        ruleOrder(quadOrder),
+        ax_func(ax_in),
+        ay_func(ay_in),
+        f_func(f_in)
+  {
+    auto const sdim = meshInfo.mesh.GetSpatialDimension();
+    if (sdim != 2) {
+      throw std::runtime_error("ScaledLaplacian is only implemented for 2D problems");
+    }
+
+    std::vector<double> weight;
+    std::vector<double> xi, eta, zeta;
+    getQuadrature(ruleType, sdim, ruleOrder, ruleLength, weight, xi, eta, zeta);
+
+    // Copy quadrature data to device
+    quadWeight_d = Kokkos::View<double*, ExecutionSpace>("quadWeight", ruleLength);
+    quadXi_d     = Kokkos::View<double*, ExecutionSpace>("quadXi", ruleLength);
+    quadEta_d    = Kokkos::View<double*, ExecutionSpace>("quadEta", ruleLength);
+    quadZeta_d   = Kokkos::View<double*, ExecutionSpace>("quadZeta", ruleLength);
+
+    auto quadWeight_h = Kokkos::create_mirror_view(quadWeight_d);
+    auto quadXi_h     = Kokkos::create_mirror_view(quadXi_d);
+    auto quadEta_h    = Kokkos::create_mirror_view(quadEta_d);
+    auto quadZeta_h   = Kokkos::create_mirror_view(quadZeta_d);
+
+    for (int i = 0; i < ruleLength; ++i) {
+      quadWeight_h(i) = weight[i];
+      quadXi_h(i)     = xi[i];
+      quadEta_h(i)    = eta[i];
+      quadZeta_h(i)   = zeta[i];
+    }
+
+    Kokkos::deep_copy(quadWeight_d, quadWeight_h);
+    Kokkos::deep_copy(quadXi_d, quadXi_h);
+    Kokkos::deep_copy(quadEta_d, quadEta_h);
+    Kokkos::deep_copy(quadZeta_d, quadZeta_h);
+  }
+
+  /// \brief Assemble linear system on CUDA using graph coloring
+  ///
+  /// \param[out] rhs Right-hand side vector (device memory)
+  /// \param[in] matRowPtr CSR row pointer (device memory)
+  /// \param[in] matColIdx CSR column indices (device memory)
+  /// \param[out] matValues CSR values (device memory)
+  ///
+  /// Uses graph coloring to enable conflict-free parallel assembly on GPU
+  void
+  GetLinearSystem(
+      Kokkos::View<double*, ExecutionSpace> rhs,
+      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+      Kokkos::View<int*, ExecutionSpace>    matColIdx,
+      Kokkos::View<double*, ExecutionSpace> matValues);
+
+  void
+  GetLinearSystemMFEM(
+      Kokkos::View<double*, ExecutionSpace> rhs,
+      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
+      Kokkos::View<int*, ExecutionSpace>    matColIdx,
+      Kokkos::View<double*, ExecutionSpace> matValues);
+
+  void
+  OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const;
+
+  int const ratio = 32;  // For MFEM_L fine mesh refinement
+
+ protected:
+  const MeshConnectivity<> meshInfo;
+
+  /// Coefficient functors (stored as member variables)
+  FuncX ax_func;
+  FuncY ay_func;
+  FuncF f_func;
+
+  RuleType ruleType   = RuleType::Gauss;
+  int      ruleOrder  = 1;
+  int      ruleLength = 0;
+
+  // Device copies of quadrature data
+  Kokkos::View<double*, ExecutionSpace> quadWeight_d;
+  Kokkos::View<double*, ExecutionSpace> quadXi_d;
+  Kokkos::View<double*, ExecutionSpace> quadEta_d;
+  Kokkos::View<double*, ExecutionSpace> quadZeta_d;
+
+  // MFEM basis functions stored on device [numElements, phiSize]
+  // phiSize = numVectors * numFineNodes = 4 * (ratio+1)^2
+  Kokkos::View<double**, ExecutionSpace> phiMFEM_d;
+
+  /// \brief Structure to hold mesh data on device
+  struct MeshDeviceData
+  {
+    Kokkos::View<int*, ExecutionSpace>    cellTypes;
+    Kokkos::View<double*, ExecutionSpace> nodeCoords;
+    Kokkos::View<int**, ExecutionSpace>   cellToNode;
+  };
+
+  /// \brief Copy mesh data to device
+  ///
+  /// Extracts mesh topology and geometry to device-accessible Kokkos::Views
+  /// \return MeshDeviceData structure with device views
+  MeshDeviceData
+  CopyMeshToDevice() const
+  {
+    int const numCells = meshInfo.mesh.NumberCells();
+    int const numNodes = meshInfo.mesh.NumberVertices();
+    int const sdim     = meshInfo.mesh.GetSpatialDimension();
+
+    MeshDeviceData data;
+
+    // Copy cell types
+    data.cellTypes = Kokkos::View<int*, ExecutionSpace>("cellTypes", numCells);
+    {
+      auto  cellTypes_h   = Kokkos::create_mirror_view(data.cellTypes);
+      auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
+      Kokkos::parallel_for(
+          "CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
+            cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
+          });
+      Kokkos::deep_copy(data.cellTypes, cellTypes_h);
+    }
+
+    // Copy node coordinates (interleaved)
+    data.nodeCoords = Kokkos::View<double*, ExecutionSpace>("nodeCoords", numNodes * sdim);
+    {
+      auto  nodeCoords_h = Kokkos::create_mirror_view(data.nodeCoords);
+      auto& mesh_ref     = meshInfo.mesh;
+      Kokkos::parallel_for(
+          "NodeCoords_Copy",
+          Kokkos::RangePolicy<HostSpace>(0, numNodes),
+          [=, &mesh_ref](const int in) {
+            auto const vertex = mesh_ref.GetVertex(in);
+            for (int d = 0; d < sdim; ++d) {
+              nodeCoords_h(in * sdim + d) = vertex[d];
+            }
+          });
+      Kokkos::deep_copy(data.nodeCoords, nodeCoords_h);
+    }
+
+    // Copy cell-to-node connectivity
+    data.cellToNode =
+        Kokkos::View<int**, ExecutionSpace>("cellToNode", numCells, 4);  // Q1 has 4 nodes max
+    {
+      auto  cellToNode_h = Kokkos::create_mirror_view(data.cellToNode);
+      auto& mesh_ref     = meshInfo.mesh;
+      Kokkos::parallel_for(
+          "CellToNodes_Copy",
+          Kokkos::RangePolicy<HostSpace>(0, numCells),
+          [=, &mesh_ref](const int ic) {
+            auto const& nodeList = mesh_ref.NodeList(ic);
+            auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
+            for (int in = 0; in < nodeList.size() && in < 4; ++in) {
+              c2n_ic(in) = nodeList[in];
+            }
+          });
+      Kokkos::deep_copy(data.cellToNode, cellToNode_h);
+    }
+
+    return data;
+  }
+
+  /// \brief Device kernel for Q1 element assembly
+  ///
+  /// Computes element stiffness matrix and RHS for a single Q1 element
+  /// This function is designed to be called from within a CUDA kernel
+  /// \param[in] coords Element nodal coordinates [8 values: x0,y0,x1,y1,x2,y2,x3,y3]
+  /// \param[in] ax, ay, f Coefficient functors (types from class template)
+  ///
+  template <typename Scalar>
+  KOKKOS_INLINE_FUNCTION static void
+  ElementaryDataQ1(
+      const Scalar* __restrict__ coords,
+      const Scalar* __restrict__ quadWeight,
+      const Scalar* __restrict__ quadXi,
+      const Scalar* __restrict__ quadEta,
+      const Scalar* __restrict__ quadZeta,
+      int   ruleLen,
+      FuncX ax,
+      FuncY ay,
+      FuncF f,
+      Scalar* __restrict__ rele,  // Element RHS [4 values]
+      Scalar* __restrict__ kele   // Element stiffness [16 values]
+  )
+  {
+    /// TODO Could we generalize the routine by introducing ElementType as template parameter
+    using ElementType = fe2DQ1Cuda;
+
+    constexpr int dim    = 2;
+    constexpr int nNodes = ElementType::numNode;
+
+    // Initialize output arrays
+    for (int i = 0; i < nNodes; ++i) {
+      rele[i] = Scalar(0);
+    }
+    for (int i = 0; i < nNodes * nNodes; ++i) {
+      kele[i] = Scalar(0);
+    }
+
+    Scalar NandGradN[nNodes * (dim + 1)];
+    Scalar pointJac[dim * (dim + 1)];
+    Scalar alpha[dim];
+    Scalar GradPhi[nNodes * dim];
+
+    // Quadrature loop
+    for (int iq = 0; iq < ruleLen; ++iq) {
+      ElementType::GetValuesGradients(quadXi[iq], quadEta[iq], quadZeta[iq], NandGradN);
+
+      // Compute Jacobian: pointJac = [x, y, dx/dxi, dy/dxi, dx/deta, dy/deta]
+      for (int jd = 0; jd <= dim; ++jd) {
+        for (int id = 0; id < dim; ++id) {
+          Scalar jacEntry = Scalar(0);
+          for (int kn = 0; kn < nNodes; ++kn) {
+            jacEntry += NandGradN[kn + jd * nNodes] * coords[id + kn * dim];
+          }
+          pointJac[id + jd * dim] = jacEntry;
+        }
+      }
+
+      auto const xq = pointJac[0];
+      auto const yq = pointJac[1];
+
+      // Get material coefficients (note: these are evaluated on host)
+      alpha[0] = ax(xq, yq, 0);
+      alpha[1] = ay(xq, yq, 0);
+
+      // Compute inverse Jacobian
+      Scalar detJ          = Scalar(1);
+      Scalar* __restrict J = &pointJac[dim];
+      InverseInPlaceCuda<dim>(J, detJ);
+
+      // Transform gradients: GradPhi = J^T * GradN
+      Scalar const* __restrict GradN = &NandGradN[nNodes];
+      for (int jn = 0; jn < nNodes; ++jn) {
+        for (int in = 0; in < dim; ++in) {
+          Scalar tmpGrad = 0;
+          for (int kn = 0; kn < dim; ++kn) {
+            tmpGrad += J[in + kn * dim] * GradN[jn + kn * nNodes];
+          }
+          GradPhi[in + jn * dim] = tmpGrad;
+        }
+      }
+
+      // Assemble element stiffness matrix (symmetric)
+      Scalar w_v   = quadWeight[iq];
+      Scalar coeff = w_v * detJ;
+      for (int jn = 0; jn < nNodes; ++jn) {
+        for (int in = 0; in <= jn; ++in) {
+          Scalar sum = Scalar(0);
+          for (int kn = 0; kn < dim; ++kn) {
+            sum += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim];
+          }
+          kele[in + jn * nNodes] += sum * coeff;
+        }
+      }
+
+      // Assemble RHS
+      Scalar fq = f(xq, yq, 0);
+      for (int in = 0; in < nNodes; ++in) {
+        rele[in] += fq * NandGradN[in] * coeff;
+      }
+    }  // for (int iq = 0; iq < ruleLen; ++iq)
+
+    // Symmetrize the matrix once after all quadrature points
+    for (int jn = 0; jn < nNodes; ++jn) {
+      for (int in = jn + 1; in < nNodes; ++in) {
+        kele[in + jn * nNodes] = kele[jn + in * nNodes];
+      }
+    }
+  }
+};
 
 /// \brief Functor for MFEM element assembly
 /// Must be at namespace scope for CUDA compatibility
@@ -109,6 +408,7 @@ struct MFEMAssemblyFunctor
     // Setup basis functions on boundaries
     // phi is a matrix of size (numVectors x numFineNodes) stored in column-major order
     // Each column represents one basis function evaluated at all fine nodes
+    constexpr int     numVectors = 4;  // Number of coarse element nodes
     scratch_double_1d phi(teamMember.team_scratch(1), numVectors * numFineNodes);
 
     // Initialize phi to zero
@@ -125,7 +425,6 @@ struct MFEMAssemblyFunctor
     });
 
     // 8 vectors for static condensation: 4 RHS + 4 solutions (one per basis function)
-    constexpr int     numVectors = 4;  // Number of coarse element nodes
     scratch_double_1d btmp(teamMember.team_scratch(1), numFreeDofs * numVectors);  // RHS vectors
     // Solution vectors - no need to initialize utmp
     scratch_double_1d utmp(teamMember.team_scratch(1), numFreeDofs * numVectors);
@@ -595,10 +894,10 @@ struct MFEMAssemblyFunctor
     // ========================================================================
     // Save phi basis functions to global memory for later reconstruction
     // ========================================================================
-    constexpr int numVectors = 4;  // Q1 coarse element has 4 nodes
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int idx) {
-      phiMFEM_global(ieleCoarse_actual, idx) = phi(idx);
-    });
+    Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int idx) {
+          phiMFEM_global(ieleCoarse_actual, idx) = phi(idx);
+        });
     teamMember.team_barrier();
 
     // ========================================================================
@@ -683,306 +982,6 @@ struct MFEMAssemblyFunctor
         int const coarseNode = cellToNode(ieleCoarse_actual, ir);
         Kokkos::atomic_add(&globalRhs(coarseNode), sum);
       });
-    }
-  }
-};
-
-/// \brief CUDA ScaledLaplacian class for 2D problems
-///
-/// This class provides CUDA-accelerated assembly for the scaled Laplacian operator:
-///   -∇·(α∇u) = f
-///
-/// Supported elements:
-///   - Q1 (bilinear quadrilateral) in 2D
-///   - MFEM_L (Multiscale FEM with static condensation) in 2D
-///
-/// Note: Q2, 1D, and 3D cases are not implemented (per user requirements)
-///
-/// Template parameters:
-///   - ExecutionSpace: Kokkos execution space (e.g., Kokkos::Cuda, Kokkos::OpenMP)
-///   - FuncX, FuncY, FuncF: Functor types for coefficients ax, ay, and f
-///     Each must have operator()(double x, double y, double z) marked KOKKOS_INLINE_FUNCTION
-///
-template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
-class ScaledLaplacian
-{
- public:
-  using HostSpace = Kokkos::DefaultHostExecutionSpace;
-
-  ScaledLaplacian(
-      const MeshConnectivity<>& meshData,
-      RuleType                  quadRule,
-      int                       quadOrder,
-      FuncX                     ax_in,
-      FuncY                     ay_in,
-      FuncF                     f_in)
-      : meshInfo(meshData),
-        ruleType(quadRule),
-        ruleOrder(quadOrder),
-        ax_func(ax_in),
-        ay_func(ay_in),
-        f_func(f_in)
-  {
-    auto const sdim = meshInfo.mesh.GetSpatialDimension();
-    if (sdim != 2) {
-      throw std::runtime_error("ScaledLaplacian is only implemented for 2D problems");
-    }
-
-    std::vector<double> weight;
-    std::vector<double> xi, eta, zeta;
-    getQuadrature(ruleType, sdim, ruleOrder, ruleLength, weight, xi, eta, zeta);
-
-    // Copy quadrature data to device
-    quadWeight_d = Kokkos::View<double*, ExecutionSpace>("quadWeight", ruleLength);
-    quadXi_d     = Kokkos::View<double*, ExecutionSpace>("quadXi", ruleLength);
-    quadEta_d    = Kokkos::View<double*, ExecutionSpace>("quadEta", ruleLength);
-    quadZeta_d   = Kokkos::View<double*, ExecutionSpace>("quadZeta", ruleLength);
-
-    auto quadWeight_h = Kokkos::create_mirror_view(quadWeight_d);
-    auto quadXi_h     = Kokkos::create_mirror_view(quadXi_d);
-    auto quadEta_h    = Kokkos::create_mirror_view(quadEta_d);
-    auto quadZeta_h   = Kokkos::create_mirror_view(quadZeta_d);
-
-    for (int i = 0; i < ruleLength; ++i) {
-      quadWeight_h(i) = weight[i];
-      quadXi_h(i)     = xi[i];
-      quadEta_h(i)    = eta[i];
-      quadZeta_h(i)   = zeta[i];
-    }
-
-    Kokkos::deep_copy(quadWeight_d, quadWeight_h);
-    Kokkos::deep_copy(quadXi_d, quadXi_h);
-    Kokkos::deep_copy(quadEta_d, quadEta_h);
-    Kokkos::deep_copy(quadZeta_d, quadZeta_h);
-  }
-
-  /// \brief Assemble linear system on CUDA using graph coloring
-  ///
-  /// \param[out] rhs Right-hand side vector (device memory)
-  /// \param[in] matRowPtr CSR row pointer (device memory)
-  /// \param[in] matColIdx CSR column indices (device memory)
-  /// \param[out] matValues CSR values (device memory)
-  ///
-  /// Uses graph coloring to enable conflict-free parallel assembly on GPU
-  void
-  GetLinearSystem(
-      Kokkos::View<double*, ExecutionSpace> rhs,
-      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
-      Kokkos::View<int*, ExecutionSpace>    matColIdx,
-      Kokkos::View<double*, ExecutionSpace> matValues);
-
-  void
-  GetLinearSystemMFEM(
-      Kokkos::View<double*, ExecutionSpace> rhs,
-      Kokkos::View<size_t*, ExecutionSpace> matRowPtr,
-      Kokkos::View<int*, ExecutionSpace>    matColIdx,
-      Kokkos::View<double*, ExecutionSpace> matValues);
-
-  void
-  OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const;
-
-  int const ratio = 32;  // For MFEM_L fine mesh refinement
-
- protected:
-  const MeshConnectivity<> meshInfo;
-
-  /// Coefficient functors (stored as member variables)
-  FuncX ax_func;
-  FuncY ay_func;
-  FuncF f_func;
-
-  RuleType ruleType   = RuleType::Gauss;
-  int      ruleOrder  = 1;
-  int      ruleLength = 0;
-
-  // Device copies of quadrature data
-  Kokkos::View<double*, ExecutionSpace> quadWeight_d;
-  Kokkos::View<double*, ExecutionSpace> quadXi_d;
-  Kokkos::View<double*, ExecutionSpace> quadEta_d;
-  Kokkos::View<double*, ExecutionSpace> quadZeta_d;
-
-  // MFEM basis functions stored on device [numElements, phiSize]
-  // phiSize = numVectors * numFineNodes = 4 * (ratio+1)^2
-  Kokkos::View<double**, ExecutionSpace> phiMFEM_d;
-
-  /// \brief Structure to hold mesh data on device
-  struct MeshDeviceData
-  {
-    Kokkos::View<int*, ExecutionSpace>    cellTypes;
-    Kokkos::View<double*, ExecutionSpace> nodeCoords;
-    Kokkos::View<int**, ExecutionSpace>   cellToNode;
-  };
-
-  /// \brief Copy mesh data to device
-  ///
-  /// Extracts mesh topology and geometry to device-accessible Kokkos::Views
-  /// \return MeshDeviceData structure with device views
-  MeshDeviceData
-  CopyMeshToDevice() const
-  {
-    int const numCells = meshInfo.mesh.NumberCells();
-    int const numNodes = meshInfo.mesh.NumberVertices();
-    int const sdim     = meshInfo.mesh.GetSpatialDimension();
-
-    MeshDeviceData data;
-
-    // Copy cell types
-    data.cellTypes = Kokkos::View<int*, ExecutionSpace>("cellTypes", numCells);
-    {
-      auto  cellTypes_h   = Kokkos::create_mirror_view(data.cellTypes);
-      auto* cellTypes_ptr = meshInfo.mesh.GetCellType().data();
-      Kokkos::parallel_for(
-          "CellTypes_Copy", Kokkos::RangePolicy<HostSpace>(0, numCells), [=](const int ic) {
-            cellTypes_h(ic) = static_cast<int>(cellTypes_ptr[ic]);
-          });
-      Kokkos::deep_copy(data.cellTypes, cellTypes_h);
-    }
-
-    // Copy node coordinates (interleaved)
-    data.nodeCoords = Kokkos::View<double*, ExecutionSpace>("nodeCoords", numNodes * sdim);
-    {
-      auto  nodeCoords_h = Kokkos::create_mirror_view(data.nodeCoords);
-      auto& mesh_ref     = meshInfo.mesh;
-      Kokkos::parallel_for(
-          "NodeCoords_Copy",
-          Kokkos::RangePolicy<HostSpace>(0, numNodes),
-          [=, &mesh_ref](const int in) {
-            auto const vertex = mesh_ref.GetVertex(in);
-            for (int d = 0; d < sdim; ++d) {
-              nodeCoords_h(in * sdim + d) = vertex[d];
-            }
-          });
-      Kokkos::deep_copy(data.nodeCoords, nodeCoords_h);
-    }
-
-    // Copy cell-to-node connectivity
-    data.cellToNode =
-        Kokkos::View<int**, ExecutionSpace>("cellToNode", numCells, 4);  // Q1 has 4 nodes max
-    {
-      auto  cellToNode_h = Kokkos::create_mirror_view(data.cellToNode);
-      auto& mesh_ref     = meshInfo.mesh;
-      Kokkos::parallel_for(
-          "CellToNodes_Copy",
-          Kokkos::RangePolicy<HostSpace>(0, numCells),
-          [=, &mesh_ref](const int ic) {
-            auto const& nodeList = mesh_ref.NodeList(ic);
-            auto        c2n_ic   = Kokkos::subview(cellToNode_h, ic, Kokkos::ALL());
-            for (int in = 0; in < nodeList.size() && in < 4; ++in) {
-              c2n_ic(in) = nodeList[in];
-            }
-          });
-      Kokkos::deep_copy(data.cellToNode, cellToNode_h);
-    }
-
-    return data;
-  }
-
-  /// \brief Device kernel for Q1 element assembly
-  ///
-  /// Computes element stiffness matrix and RHS for a single Q1 element
-  /// This function is designed to be called from within a CUDA kernel
-  /// \param[in] coords Element nodal coordinates [8 values: x0,y0,x1,y1,x2,y2,x3,y3]
-  /// \param[in] ax, ay, f Coefficient functors (types from class template)
-  ///
-  template <typename Scalar>
-  KOKKOS_INLINE_FUNCTION static void
-  ElementaryDataQ1(
-      const Scalar* __restrict__ coords,
-      const Scalar* __restrict__ quadWeight,
-      const Scalar* __restrict__ quadXi,
-      const Scalar* __restrict__ quadEta,
-      const Scalar* __restrict__ quadZeta,
-      int   ruleLen,
-      FuncX ax,
-      FuncY ay,
-      FuncF f,
-      Scalar* __restrict__ rele,  // Element RHS [4 values]
-      Scalar* __restrict__ kele   // Element stiffness [16 values]
-  )
-  {
-    /// TODO Could we generalize the routine by introducing ElementType as template parameter
-    using ElementType = fe2DQ1Cuda;
-
-    constexpr int dim    = 2;
-    constexpr int nNodes = ElementType::numNode;
-
-    // Initialize output arrays
-    for (int i = 0; i < nNodes; ++i) {
-      rele[i] = Scalar(0);
-    }
-    for (int i = 0; i < nNodes * nNodes; ++i) {
-      kele[i] = Scalar(0);
-    }
-
-    Scalar NandGradN[nNodes * (dim + 1)];
-    Scalar pointJac[dim * (dim + 1)];
-    Scalar alpha[dim];
-    Scalar GradPhi[nNodes * dim];
-
-    // Quadrature loop
-    for (int iq = 0; iq < ruleLen; ++iq) {
-      ElementType::GetValuesGradients(quadXi[iq], quadEta[iq], quadZeta[iq], NandGradN);
-
-      // Compute Jacobian: pointJac = [x, y, dx/dxi, dy/dxi, dx/deta, dy/deta]
-      for (int jd = 0; jd <= dim; ++jd) {
-        for (int id = 0; id < dim; ++id) {
-          Scalar jacEntry = Scalar(0);
-          for (int kn = 0; kn < nNodes; ++kn) {
-            jacEntry += NandGradN[kn + jd * nNodes] * coords[id + kn * dim];
-          }
-          pointJac[id + jd * dim] = jacEntry;
-        }
-      }
-
-      auto const xq = pointJac[0];
-      auto const yq = pointJac[1];
-
-      // Get material coefficients (note: these are evaluated on host)
-      alpha[0] = ax(xq, yq, 0);
-      alpha[1] = ay(xq, yq, 0);
-
-      // Compute inverse Jacobian
-      Scalar detJ          = Scalar(1);
-      Scalar* __restrict J = &pointJac[dim];
-      InverseInPlaceCuda<dim>(J, detJ);
-
-      // Transform gradients: GradPhi = J^T * GradN
-      Scalar const* __restrict GradN = &NandGradN[nNodes];
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = 0; in < dim; ++in) {
-          Scalar tmpGrad = 0;
-          for (int kn = 0; kn < dim; ++kn) {
-            tmpGrad += J[in + kn * dim] * GradN[jn + kn * nNodes];
-          }
-          GradPhi[in + jn * dim] = tmpGrad;
-        }
-      }
-
-      // Assemble element stiffness matrix (symmetric)
-      Scalar w_v   = quadWeight[iq];
-      Scalar coeff = w_v * detJ;
-      for (int jn = 0; jn < nNodes; ++jn) {
-        for (int in = 0; in <= jn; ++in) {
-          Scalar sum = Scalar(0);
-          for (int kn = 0; kn < dim; ++kn) {
-            sum += GradPhi[kn + in * dim] * alpha[kn] * GradPhi[kn + jn * dim];
-          }
-          kele[in + jn * nNodes] += sum * coeff;
-        }
-      }
-
-      // Assemble RHS
-      Scalar fq = f(xq, yq, 0);
-      for (int in = 0; in < nNodes; ++in) {
-        rele[in] += fq * NandGradN[in] * coeff;
-      }
-    }  // for (int iq = 0; iq < ruleLen; ++iq)
-
-    // Symmetrize the matrix once after all quadrature points
-    for (int jn = 0; jn < nNodes; ++jn) {
-      for (int in = jn + 1; in < nNodes; ++in) {
-        kele[in + jn * nNodes] = kele[jn + in * nNodes];
-      }
     }
   }
 };
@@ -1141,10 +1140,10 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   auto f_device  = f_func;
 
   // Allocate storage for MFEM basis functions on device
-  constexpr int numVectors_const = 4;  // Q1 coarse element has 4 nodes
+  constexpr int numVectors_const   = 4;  // Q1 coarse element has 4 nodes
   constexpr int numFineNodes_const = (ratio + 1) * (ratio + 1);
-  constexpr int phiSize = numVectors_const * numFineNodes_const;
-  int const numElements = meshInfo.mesh.NumberCells();
+  constexpr int phiSize            = numVectors_const * numFineNodes_const;
+  int const     numElements        = meshInfo.mesh.NumberCells();
   phiMFEM_d = Kokkos::View<double**, ExecutionSpace>("phiMFEM", numElements, phiSize);
 
   // Process each color
@@ -1247,7 +1246,9 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
 template <typename ExecutionSpace, typename FuncX, typename FuncY, typename FuncF>
 void
 ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
-    const double* uCoarse, int numEleX, int numEleY) const
+    const double* uCoarse,
+    int           numEleX,
+    int           numEleY) const
 {
   int const numFineEleX  = ratio * numEleX;
   int const numFineEleY  = ratio * numEleY;
@@ -1261,7 +1262,9 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
 
   // Parallel reconstruction over coarse elements on device
   Kokkos::parallel_for(
-      "MFEM_Reconstruction", Kokkos::RangePolicy<ExecutionSpace>(0, numCoarseEle), KOKKOS_LAMBDA(int eleID) {
+      "MFEM_Reconstruction",
+      Kokkos::RangePolicy<ExecutionSpace>(0, numCoarseEle),
+      KOKKOS_LAMBDA(int eleID) {
         int const iy = eleID / numEleX;
         int const ix = eleID % numEleX;
 
