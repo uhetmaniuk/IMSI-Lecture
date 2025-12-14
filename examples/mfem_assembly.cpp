@@ -1,15 +1,14 @@
 ///
-/// @file openmp_assembly.cpp
-/// @brief Example demonstrating OpenMP-accelerated FEM assembly using ScaledLaplacian
+/// @file mfem_assembly.cpp
+/// @brief Example demonstrating OpenMP-accelerated MFEM assembly using ScaledLaplacian
 ///
 /// This example shows how to use the ScaledLaplacian class with Kokkos::OpenMP
-/// execution space to assemble the scaled Laplacian operator using OpenMP threads.
+/// execution space to assemble the Multiscale Finite Element Method (MFEM) operator.
 ///
-/// Solves: -∇·(α∇u) = f on a 2D rectangular domain
+/// Solves: -∇·(α∇u) = f on a 2D rectangular domain using MFEM_L elements
 /// with homogeneous Dirichlet boundary conditions
 ///
-/// NOTE: ScaledLaplacian works with any Kokkos execution space including
-///       OpenMP, CUDA, HIP, etc. due to its functor-based design pattern.
+/// MFEM uses static condensation: solves coarse problem, then reconstructs fine solution
 ///
 
 #include <Kokkos_Core.hpp>
@@ -28,7 +27,6 @@ using namespace IMSI;
 
 // Define material coefficients and forcing term as functors at namespace scope
 // These must be KOKKOS_INLINE_FUNCTION compatible for device execution
-// NOTE: Must be at namespace scope (cannot be local types in main())
 struct AxFunctor {
   KOKKOS_INLINE_FUNCTION
   double operator()(double x, double y, double z) const { return 1.0; }
@@ -54,7 +52,7 @@ int main(int argc, char* argv[])
 {
   Kokkos::initialize(argc, argv);
   {
-    std::cout << "=== OpenMP FEM Assembly Example (using ScaledLaplacian) ===" << std::endl;
+    std::cout << "=== OpenMP MFEM Assembly Example (using ScaledLaplacian) ===" << std::endl;
     std::cout << "Kokkos execution space: " << typeid(Kokkos::OpenMP).name() << std::endl;
     std::cout << std::endl;
 
@@ -70,25 +68,32 @@ int main(int argc, char* argv[])
 #endif
 
     // ========================================================================
-    // Problem setup
+    // Problem setup - MFEM Configuration
     // ========================================================================
+
+    const int coarseSize = 32;  // 32x32 coarse mesh
+    const int ratio = 32;        // Fine mesh has 32x finer resolution
 
     // ========================================================================
     // Mesh generation
     // ========================================================================
 
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 256;
-    dParams.numElePerDir[1] = 256;
+    dParams.numElePerDir[0] = coarseSize;
+    dParams.numElePerDir[1] = coarseSize;
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::Q1;
+    dParams.cellType        = IMSI::ElementType::MFEM_L;
 
-    std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
-              << " Q1 elements" << std::endl;
+    std::cout << "Generating MFEM mesh:" << std::endl;
+    std::cout << "  Coarse mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
+              << " MFEM_L elements" << std::endl;
+    std::cout << "  Ratio: " << ratio << std::endl;
+    std::cout << "  Effective fine mesh: " << coarseSize * ratio << " x " << coarseSize * ratio
+              << " (" << (coarseSize * ratio + 1) * (coarseSize * ratio + 1) << " fine nodes)" << std::endl;
 
     auto mesh = IMSI::GenerateMesh(dParams);
-    std::cout << "  Number of elements: " << mesh.NumberCells() << std::endl;
-    std::cout << "  Number of nodes:    " << mesh.NumberVertices() << std::endl;
+    std::cout << "  Number of coarse elements: " << mesh.NumberCells() << std::endl;
+    std::cout << "  Number of coarse nodes:    " << mesh.NumberVertices() << std::endl;
 
     // ========================================================================
     // Build mesh connectivity and graph coloring
@@ -112,8 +117,8 @@ int main(int argc, char* argv[])
     auto const numNodes = mesh.NumberVertices();
     auto const numNonZeros = meshConn.n2n.entries.extent(0);
 
-    std::cout << "  Matrix size: " << numNodes << " x " << numNodes << std::endl;
-    std::cout << "  Non-zeros:   " << numNonZeros << std::endl;
+    std::cout << "  Matrix size (coarse): " << numNodes << " x " << numNodes << std::endl;
+    std::cout << "  Non-zeros:            " << numNonZeros << std::endl;
 
     // OpenMP execution space views (host-accessible)
     Kokkos::View<double*, Kokkos::OpenMP> rhs("rhs", numNodes);
@@ -134,10 +139,10 @@ int main(int argc, char* argv[])
     Kokkos::deep_copy(rhs, 0.0);
 
     // ========================================================================
-    // Assembly with OpenMP
+    // Assembly with OpenMP - MFEM
     // ========================================================================
 
-    std::cout << "\n=== Starting OpenMP Assembly ===" << std::endl;
+    std::cout << "\n=== Starting OpenMP MFEM Assembly ===" << std::endl;
 
     // Create coefficient functor instances
     AxFunctor ax_func;
@@ -149,11 +154,11 @@ int main(int argc, char* argv[])
         meshConn, RuleType::Gauss, 2, ax_func, ay_func, f_func);
 
     Kokkos::Timer timer;
-    scalarLap.GetLinearSystem(rhs, matRowPtr, matColIdx, matValues);
+    scalarLap.GetLinearSystemMFEM(rhs, matRowPtr, matColIdx, matValues);
     Kokkos::fence();
     double assemblyTime = timer.seconds();
 
-    std::cout << "=== Assembly Complete ===" << std::endl;
+    std::cout << "=== MFEM Assembly Complete ===" << std::endl;
     std::cout << "Assembly time: " << assemblyTime * 1000.0 << " ms" << std::endl;
     std::cout << std::endl;
 
@@ -169,9 +174,9 @@ int main(int argc, char* argv[])
     IMSI::MapDegreesOfFreedom(bdyNodes, globalToFree, freeToGlobal);
 
     auto numFreeDofs = freeToGlobal.size();
-    std::cout << "  Total DOFs:    " << numNodes << std::endl;
-    std::cout << "  Boundary DOFs: " << numNodes - numFreeDofs << std::endl;
-    std::cout << "  Free DOFs:     " << numFreeDofs << std::endl;
+    std::cout << "  Total coarse DOFs:    " << numNodes << std::endl;
+    std::cout << "  Boundary DOFs:        " << numNodes - numFreeDofs << std::endl;
+    std::cout << "  Free coarse DOFs:     " << numFreeDofs << std::endl;
 
     // Build reduced system
     std::vector<int> newRowPtr(numFreeDofs + 1, 0);
@@ -217,28 +222,40 @@ int main(int argc, char* argv[])
     std::cout << "  Solve time:         " << solveTime * 1000.0 << " ms" << std::endl;
 
     // ========================================================================
-    // Output results
+    // Output results - Coarse solution
     // ========================================================================
 
-    std::cout << "\nWriting solution to file..." << std::endl;
+    std::cout << "\nWriting coarse solution to file..." << std::endl;
 
     std::vector<double> fullSolution(numNodes, 0.0);
     for (size_t i = 0; i < numFreeDofs; ++i) {
       fullSolution[freeToGlobal[i]] = solution[i];
     }
 
-    OutputToGMSH("openmp_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
-    std::cout << "  Solution written to: openmp_solution.msh" << std::endl;
+    OutputToGMSH("mfem_coarse_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+    std::cout << "  Coarse solution written to: mfem_coarse_solution.msh" << std::endl;
+
+    // ========================================================================
+    // Output fine-scale solution (MFEM reconstruction)
+    // ========================================================================
+
+    std::cout << "\nReconstructing fine-scale solution..." << std::endl;
+    timer.reset();
+    scalarLap.OutputMFEMFine(fullSolution.data(), dParams.numElePerDir[0], dParams.numElePerDir[1]);
+    double reconstructTime = timer.seconds();
+    std::cout << "  Fine-scale reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
+    std::cout << "  Fine solution written to: outputFine.txt" << std::endl;
 
     // ========================================================================
     // Performance summary
     // ========================================================================
 
     std::cout << "\n=== Performance Summary ===" << std::endl;
-    std::cout << "Assembly time:       " << assemblyTime * 1000.0 << " ms" << std::endl;
-    std::cout << "Factorization time:  " << factorTime * 1000.0 << " ms" << std::endl;
-    std::cout << "Solve time:          " << solveTime * 1000.0 << " ms" << std::endl;
-    std::cout << "Total time:          " << (assemblyTime + factorTime + solveTime) * 1000.0 << " ms"
+    std::cout << "MFEM Assembly time:       " << assemblyTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Factorization time:       " << factorTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Solve time:               " << solveTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Fine reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Total time:               " << (assemblyTime + factorTime + solveTime + reconstructTime) * 1000.0 << " ms"
               << std::endl;
     std::cout << std::endl;
 
@@ -247,7 +264,7 @@ int main(int argc, char* argv[])
     double maxVal = *std::max_element(solution.begin(), solution.end());
     double avgVal = std::accumulate(solution.begin(), solution.end(), 0.0) / solution.size();
 
-    std::cout << "Solution statistics:" << std::endl;
+    std::cout << "Coarse solution statistics:" << std::endl;
     std::cout << "  Min value: " << minVal << std::endl;
     std::cout << "  Max value: " << maxVal << std::endl;
     std::cout << "  Avg value: " << avgVal << std::endl;

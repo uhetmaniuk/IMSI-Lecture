@@ -1,29 +1,26 @@
 #!/usr/bin/env julia
 #
-# @file openmp_assembly.jl
-# @brief Julia version of OpenMP FEM assembly example (Optimized)
+# @file mfem_assembly.jl
+# @brief Julia implementation of 2D MFEM (Multiscale Finite Element Method)
 #
 # Solves: -∇·(α∇u) = f on a 2D rectangular domain
 # with homogeneous Dirichlet boundary conditions
 #
 # Features:
-# - 2D Q1 (bilinear quadrilateral) finite elements
+# - 2D MFEM elements with local fine-grid resolution
 # - Varying coefficients ax, ay, f
 # - Thread-parallel assembly with graph coloring
 # - Built-in sparse solver (\)
-#
-# Performance Optimizations (inspired by FinEtoolsMultithreading.jl):
-# 1. Lookup table for O(1) matrix position finding (replaces linear search)
-# 2. Binary search fallback option (O(log n) vs O(n))
-# 3. Parallel transpose_graph with per-thread reduction
-# 4. Parallel combine_graphs for graph composition
-# 5. Parallel prefix sum for CSR construction
-# 6. Thread-parallel CSR row sorting
+# - Static condensation for coarse-scale system
 #
 
 using SparseArrays
 using LinearAlgebra
 using Printf
+
+# Fix for thread scaling: disable nested threading in BLAS
+# This prevents oversubscription when using Threads.@threads
+BLAS.set_num_threads(1)
 
 # ============================================================================
 # Q1 Finite Element (2D Bilinear Quadrilateral)
@@ -146,43 +143,28 @@ end
 # ============================================================================
 
 """
-Transpose a graph stored as CSR (row_ptr, col_idx) - Parallel version
+Transpose a graph stored as CSR (row_ptr, col_idx)
 """
 function transpose_graph(n::Int, m::Int, row_ptr::Vector{Int}, col_idx::Vector{Int})
     nnz = length(col_idx)
-    num_threads = Threads.nthreads()
 
-    # Phase 1: Count entries per column (parallel reduction)
-    col_counts_per_thread = [zeros(Int, m) for _ = 1:num_threads]
-
-    Threads.@threads for i = 1:n
-        tid = Threads.threadid()
-        local_count = col_counts_per_thread[tid]
-        for k = row_ptr[i]:row_ptr[i + 1] - 1
-            local_count[col_idx[k]] += 1
-        end
-    end
-
-    # Reduce counts from all threads
+    # Count entries per column
     col_count = zeros(Int, m)
-    for tid = 1:num_threads
-        col_count .+= col_counts_per_thread[tid]
+    for j in col_idx
+        col_count[j] += 1
     end
 
-    # Phase 2: Build new row_ptr (parallel prefix sum)
+    # Build new row_ptr
     new_row_ptr = zeros(Int, m + 1)
     new_row_ptr[1] = 1
     for i = 1:m
         new_row_ptr[i + 1] = new_row_ptr[i] + col_count[i]
     end
 
-    # Phase 3: Fill new_col_idx (parallel with per-row atomics)
-    # We use a simpler approach: each row tracks its own fill position
+    # Fill new_col_idx
     new_col_idx = zeros(Int, nnz)
     col_offset = zeros(Int, m)
 
-    # Sequential fill (safe and simple)
-    # Note: Could use atomic operations for true parallelism, but this is fast enough
     for i = 1:n
         for k = row_ptr[i]:row_ptr[i + 1] - 1
             j = col_idx[k]
@@ -196,15 +178,15 @@ function transpose_graph(n::Int, m::Int, row_ptr::Vector{Int}, col_idx::Vector{I
 end
 
 """
-Combine two graphs: A → B and B → C to get A → C - Parallel version
+Combine two graphs: A → B and B → C to get A → C
 """
 function combine_graphs(na::Int, nb::Int, nc::Int,
                        ab_row_ptr::Vector{Int}, ab_col_idx::Vector{Int},
                        bc_row_ptr::Vector{Int}, bc_col_idx::Vector{Int})
-    # Phase 1: Build sets in parallel
+    # Result: ac[i] = union of bc[ab[i][j]] for all j
     ac_sets = [Set{Int}() for _ = 1:na]
 
-    Threads.@threads for i = 1:na
+    for i = 1:na
         for k1 = ab_row_ptr[i]:ab_row_ptr[i + 1] - 1
             b = ab_col_idx[k1]
             for k2 = bc_row_ptr[b]:bc_row_ptr[b + 1] - 1
@@ -214,79 +196,25 @@ function combine_graphs(na::Int, nb::Int, nc::Int,
         end
     end
 
-    # Phase 2: Compute row_ptr in parallel
-    ac_lengths = zeros(Int, na)
-    Threads.@threads for i = 1:na
-        ac_lengths[i] = length(ac_sets[i])
-    end
-
+    # Convert sets to CSR
     ac_row_ptr = zeros(Int, na + 1)
     ac_row_ptr[1] = 1
     for i = 1:na
-        ac_row_ptr[i + 1] = ac_row_ptr[i] + ac_lengths[i]
+        ac_row_ptr[i + 1] = ac_row_ptr[i] + length(ac_sets[i])
     end
 
-    # Phase 3: Fill col_idx in parallel
     nnz = ac_row_ptr[na + 1] - 1
     ac_col_idx = zeros(Int, nnz)
 
-    Threads.@threads for i = 1:na
-        if ac_lengths[i] > 0
-            start_pos = ac_row_ptr[i]
-            sorted_cols = sort(collect(ac_sets[i]))
-            for (j, c) in enumerate(sorted_cols)
-                ac_col_idx[start_pos + j - 1] = c
-            end
+    pos = 1
+    for i = 1:na
+        for c in sort(collect(ac_sets[i]))
+            ac_col_idx[pos] = c
+            pos += 1
         end
     end
 
     return ac_row_ptr, ac_col_idx
-end
-
-"""
-Parallel prefix sum (exclusive scan) using chunked algorithm
-Modifies arr in place to contain cumulative sums
-"""
-function parallel_prefix_sum!(arr::Vector{Int})
-    n = length(arr)
-    if n <= 1
-        return
-    end
-
-    num_threads = Threads.nthreads()
-    chunk_size = max(1, div(n, num_threads))
-
-    # Compute chunk boundaries
-    chunks = [(i*chunk_size+1):min((i+1)*chunk_size, n) for i = 0:num_threads-1]
-    filter!(c -> !isempty(c), chunks)
-    nchunks = length(chunks)
-
-    # Phase 1: Parallel scan within each chunk
-    chunk_sums = zeros(Int, nchunks)
-
-    Threads.@threads for i = 1:nchunks
-        chunk = chunks[i]
-        local_sum = 0
-        for j in chunk
-            temp = arr[j]
-            arr[j] = local_sum
-            local_sum += temp
-        end
-        chunk_sums[i] = local_sum
-    end
-
-    # Phase 2: Sequential scan of chunk sums
-    for i = 2:nchunks
-        chunk_sums[i] += chunk_sums[i-1]
-    end
-
-    # Phase 3: Parallel addition of chunk offsets
-    Threads.@threads for i = 2:nchunks
-        offset = chunk_sums[i-1]
-        for j in chunks[i]
-            arr[j] += offset
-        end
-    end
 end
 
 """
@@ -361,7 +289,7 @@ function build_mesh_connectivity(mesh::Mesh)
 end
 
 # ============================================================================
-# FEM Assembly
+# FEM Assembly - Standard Q1 Element
 # ============================================================================
 
 """
@@ -421,96 +349,350 @@ function assemble_element!(Ke::Matrix{Float64}, fe::Vector{Float64},
     end
 end
 
+# ============================================================================
+# MFEM Assembly - Multiscale Finite Element
+# ============================================================================
+
 """
-Find position of column j in row i of CSR matrix using binary search
-Assumes col_idx is sorted within each row
+Build CSR sparsity pattern for structured fine grid
+ratio: refinement ratio (fine grid is (ratio+1) x (ratio+1) nodes)
+"""
+function build_fine_grid_sparsity(ratio::Int)
+    numNodes = (ratio + 1) * (ratio + 1)
+
+    matRowPtr = zeros(Int, numNodes + 1)
+    matColIdx = Int[]
+
+    for iy = 0:ratio
+        for ix = 0:ratio
+            nodeID = ix + iy * (ratio + 1) + 1  # 1-based indexing
+
+            # Add neighbors in 9-point stencil
+            if iy > 0
+                if ix > 0
+                    push!(matColIdx, nodeID - 1 - (ratio + 1))
+                end
+                push!(matColIdx, nodeID - (ratio + 1))
+                if ix < ratio
+                    push!(matColIdx, nodeID + 1 - (ratio + 1))
+                end
+            end
+            if ix > 0
+                push!(matColIdx, nodeID - 1)
+            end
+            push!(matColIdx, nodeID)
+            if ix < ratio
+                push!(matColIdx, nodeID + 1)
+            end
+            if iy < ratio
+                if ix > 0
+                    push!(matColIdx, nodeID - 1 + (ratio + 1))
+                end
+                push!(matColIdx, nodeID + (ratio + 1))
+                if ix < ratio
+                    push!(matColIdx, nodeID + 1 + (ratio + 1))
+                end
+            end
+
+            matRowPtr[nodeID + 1] = length(matColIdx)
+        end
+    end
+
+    # Convert to 1-based CSR
+    matRowPtr[1] = 1
+    for i = 2:numNodes+1
+        matRowPtr[i] += 1
+    end
+
+    return matRowPtr, matColIdx
+end
+
+"""
+Assemble fine grid matrix and RHS for a single coarse element
+"""
+function assemble_fine_grid!(matValues::Vector{Float64}, rhs::Vector{Float64},
+                            matRowPtr::Vector{Int}, matColIdx::Vector{Int},
+                            elem::Q1Element, ratio::Int,
+                            x_corner::Vector{Float64}, y_corner::Vector{Float64},
+                            ax_func::Function, ay_func::Function, f_func::Function)
+    fill!(matValues, 0.0)
+    fill!(rhs, 0.0)
+
+    # Compute fine grid spacing
+    hx = (x_corner[2] - x_corner[1]) / ratio
+    hy = (y_corner[4] - y_corner[1]) / ratio
+
+    # Assemble each fine element
+    Ke_fine = zeros(4, 4)
+    fe_fine = zeros(4)
+
+    for iy = 0:ratio-1
+        for ix = 0:ratio-1
+            # Fine element corners
+            x_fine = zeros(4)
+            y_fine = zeros(4)
+            x_fine[1] = x_corner[1] + ix * hx
+            y_fine[1] = y_corner[1] + iy * hy
+            x_fine[2] = x_fine[1] + hx
+            y_fine[2] = y_fine[1]
+            x_fine[3] = x_fine[2]
+            y_fine[3] = y_fine[2] + hy
+            x_fine[4] = x_fine[1]
+            y_fine[4] = y_fine[3]
+
+            # Assemble fine element
+            assemble_element!(Ke_fine, fe_fine, elem, x_fine, y_fine, ax_func, ay_func, f_func)
+
+            # Fine element node list (1-based)
+            nodeList = [
+                ix + iy * (ratio + 1) + 1,
+                ix + 1 + iy * (ratio + 1) + 1,
+                ix + 1 + (iy + 1) * (ratio + 1) + 1,
+                ix + (iy + 1) * (ratio + 1) + 1
+            ]
+
+            # Scatter to global fine grid arrays
+            for i = 1:4
+                gi = nodeList[i]
+                rhs[gi] += fe_fine[i]
+
+                for j = 1:4
+                    gj = nodeList[j]
+                    # Find position in sparse matrix
+                    for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
+                        if matColIdx[k] == gj
+                            matValues[k] += Ke_fine[i, j]
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+"""
+Compute MFEM basis functions and coarse element matrices
+Returns: phi (basis functions on fine grid)
+"""
+function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Float64},
+                              elem::Q1Element, ratio::Int,
+                              x_corner::Vector{Float64}, y_corner::Vector{Float64},
+                              ax_func::Function, ay_func::Function, f_func::Function)
+    numNodes = (ratio + 1) * (ratio + 1)
+    numVectors = 4  # Number of coarse basis functions
+    numVectorsToSolve = 3  # Solve only 3, get 4th from partition of unity
+
+    # Build fine grid sparsity pattern
+    matRowPtr, matColIdx = build_fine_grid_sparsity(ratio)
+    nnz = length(matColIdx)
+    matValues = zeros(nnz)
+    rhs_fine = zeros(numNodes)
+
+    # Assemble fine grid matrix and RHS
+    assemble_fine_grid!(matValues, rhs_fine, matRowPtr, matColIdx, elem, ratio,
+                       x_corner, y_corner, ax_func, ay_func, f_func)
+
+    # Build DOF mapping (interior = free, boundary = fixed)
+    globalToFree = fill(-1, numNodes)
+    freeToGlobal = Int[]
+
+    for iy = 0:ratio
+        for ix = 0:ratio
+            # Skip boundary nodes
+            if ix == 0 || ix == ratio || iy == 0 || iy == ratio
+                continue
+            end
+            nodeID = ix + iy * (ratio + 1) + 1
+            push!(freeToGlobal, nodeID)
+            globalToFree[nodeID] = length(freeToGlobal)
+        end
+    end
+
+    nfree = length(freeToGlobal)
+
+    # Initialize basis functions
+    phi = zeros(numNodes, numVectors)
+
+    # Set boundary conditions for first 3 basis functions (Q1 interpolation)
+    for iy = 0:ratio
+        eta = Float64(iy) / ratio
+
+        # Left edge (x=0)
+        ix = 0
+        nodeID = ix + iy * (ratio + 1) + 1
+        phi[nodeID, 1] = 1.0 - eta  # Basis 1: bottom-left corner
+        phi[nodeID, 4] = eta        # Basis 4: top-left corner
+
+        # Right edge (x=1)
+        ix = ratio
+        nodeID = ix + iy * (ratio + 1) + 1
+        phi[nodeID, 2] = 1.0 - eta  # Basis 2: bottom-right corner
+        phi[nodeID, 3] = eta        # Basis 3: top-right corner
+    end
+
+    for ix = 0:ratio
+        xi = Float64(ix) / ratio
+
+        # Bottom edge (y=0)
+        iy = 0
+        nodeID = ix + iy * (ratio + 1) + 1
+        phi[nodeID, 1] = 1.0 - xi  # Basis 1: bottom-left corner
+        phi[nodeID, 2] = xi        # Basis 2: bottom-right corner
+
+        # Top edge (y=1)
+        iy = ratio
+        nodeID = ix + iy * (ratio + 1) + 1
+        phi[nodeID, 3] = xi        # Basis 3: top-right corner
+        phi[nodeID, 4] = 1.0 - xi  # Basis 4: top-left corner
+    end
+
+    # Build reduced system (free DOFs only)
+    reduced_row_ptr = zeros(Int, nfree + 1)
+    reduced_row_ptr[1] = 1
+
+    for i = 1:nfree
+        gi = freeToGlobal[i]
+        count = 0
+        for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
+            gj = matColIdx[k]
+            if globalToFree[gj] != -1
+                count += 1
+            end
+        end
+        reduced_row_ptr[i + 1] = reduced_row_ptr[i] + count
+    end
+
+    reduced_nnz = reduced_row_ptr[nfree + 1] - 1
+    reduced_col_idx = zeros(Int, reduced_nnz)
+    reduced_values = zeros(reduced_nnz)
+
+    pos = 1
+    for i = 1:nfree
+        gi = freeToGlobal[i]
+        for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
+            gj = matColIdx[k]
+            if globalToFree[gj] != -1
+                reduced_col_idx[pos] = globalToFree[gj]
+                reduced_values[pos] = matValues[k]
+                pos += 1
+            end
+        end
+    end
+
+    # Build RHS for basis function solves
+    btmp = zeros(nfree, numVectorsToSolve)
+
+    for i = 1:nfree
+        gi = freeToGlobal[i]
+        for ir = 1:numVectorsToSolve
+            sum_val = 0.0
+            for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
+                gj = matColIdx[k]
+                sum_val += matValues[k] * phi[gj, ir]
+            end
+            btmp[i, ir] = -sum_val
+        end
+    end
+
+    # Solve for interior basis functions
+    K_reduced = SparseMatrixCSC(nfree, nfree, reduced_row_ptr, reduced_col_idx, reduced_values)
+    utmp = K_reduced \ btmp
+
+    # Copy solutions to phi
+    for i = 1:nfree
+        gi = freeToGlobal[i]
+        for ir = 1:numVectorsToSolve
+            phi[gi, ir] = utmp[i, ir]
+        end
+    end
+
+    # Compute 4th basis function using partition of unity
+    for i = 1:numNodes
+        phi[i, 4] = 1.0 - phi[i, 1] - phi[i, 2] - phi[i, 3]
+    end
+
+    # Compute coarse element RHS: fe_coarse[ir] = phi[:,ir]' * rhs_fine
+    for ir = 1:numVectors
+        sum_val = 0.0
+        for i = 1:numNodes
+            sum_val += phi[i, ir] * rhs_fine[i]
+        end
+        fe_coarse[ir] = sum_val
+    end
+
+    # Compute coarse element stiffness: Ke_coarse[ir,jr] = phi[:,ir]' * K_fine * phi[:,jr]
+    Kphi = zeros(numNodes, numVectors)
+
+    # Matrix-vector products: Kphi = K_fine * phi
+    for ir = 1:numVectors
+        for i = 1:numNodes
+            sum_val = 0.0
+            for k = matRowPtr[i]:matRowPtr[i + 1] - 1
+                j = matColIdx[k]
+                sum_val += matValues[k] * phi[j, ir]
+            end
+            Kphi[i, ir] = sum_val
+        end
+    end
+
+    # Compute Ke_coarse = phi' * Kphi
+    for ir = 1:numVectors
+        for jr = 1:numVectors
+            sum_val = 0.0
+            for i = 1:numNodes
+                sum_val += phi[i, ir] * Kphi[i, jr]
+            end
+            Ke_coarse[ir, jr] = sum_val
+        end
+    end
+
+    return phi  # Return basis functions for fine-scale reconstruction
+end
+
+# ============================================================================
+# System Assembly with MFEM
+# ============================================================================
+
+"""
+Find position of column j in row i of CSR matrix
 """
 function find_matrix_position(row_ptr::Vector{Int}, col_idx::Vector{Int}, i::Int, j::Int)
-    left = row_ptr[i]
-    right = row_ptr[i + 1] - 1
-
-    while left <= right
-        mid = (left + right) >> 1
-        if col_idx[mid] == j
-            return mid
-        elseif col_idx[mid] < j
-            left = mid + 1
-        else
-            right = mid - 1
+    for k = row_ptr[i]:row_ptr[i + 1] - 1
+        if col_idx[k] == j
+            return k
         end
     end
     return -1
 end
 
 """
-Build lookup table for fast matrix position finding (O(1) instead of O(log n))
-Returns: Vector of Dict{Int, Int} where lookup[i][j] = position in values array
+Assemble global system with MFEM elements (thread-parallel with coloring)
+Returns: mat_values, rhs, basis_functions
 """
-function build_lookup_table(n::Int, row_ptr::Vector{Int}, col_idx::Vector{Int})
-    lookup = Vector{Dict{Int, Int}}(undef, n)
-
-    Threads.@threads for i = 1:n
-        lookup[i] = Dict{Int, Int}()
-        for k = row_ptr[i]:row_ptr[i + 1] - 1
-            lookup[i][col_idx[k]] = k
-        end
-    end
-
-    return lookup
-end
-
-"""
-Sort column indices within each row of CSR matrix (enables binary search)
-Modifies col_idx and values in place
-"""
-function sort_csr_rows!(n::Int, row_ptr::Vector{Int}, col_idx::Vector{Int}, values::Vector{Float64})
-    Threads.@threads for i = 1:n
-        start = row_ptr[i]
-        stop = row_ptr[i + 1] - 1
-        if stop > start
-            # Get indices for this row
-            row_range = start:stop
-            # Sort column indices and permute values accordingly
-            perm = sortperm(view(col_idx, row_range))
-            col_idx[row_range] = col_idx[row_range][perm]
-            values[row_range] = values[row_range][perm]
-        end
-    end
-end
-
-"""
-Assemble global system with thread-parallel coloring (with lookup table option)
-Returns: mat_values, rhs, color_times, lookup_time
-"""
-function assemble_system(mesh::Mesh, elem::Q1Element,
-                        n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
-                        e2e_colors::Vector{Vector{Int}},
-                        ax_func::Function, ay_func::Function, f_func::Function;
-                        use_lookup::Bool=true)
+function assemble_system_mfem(mesh::Mesh, elem::Q1Element, ratio::Int,
+                             n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
+                             e2e_colors::Vector{Vector{Int}},
+                             ax_func::Function, ay_func::Function, f_func::Function)
     nnodes = length(mesh.vertex_x)
     nnz = length(n2n_col_idx)
+    nel = size(mesh.cell_to_node, 1)
 
     # Initialize global arrays
     mat_values = zeros(nnz)
     rhs = zeros(nnodes)
 
-    # Build lookup table for fast matrix access (O(1) instead of O(log n))
-    t_lookup = time()
-    lookup = use_lookup ? build_lookup_table(nnodes, n2n_row_ptr, n2n_col_idx) : nothing
-    lookup_time = time() - t_lookup
+    # Store basis functions for each element (for fine-scale reconstruction)
+    numFineNodes = (ratio + 1) * (ratio + 1)
+    basis_functions = [zeros(numFineNodes, 4) for _ = 1:nel]
 
     # Thread-local element matrices
     num_threads = Threads.nthreads()
     Ke_local = [zeros(4, 4) for _ = 1:num_threads]
     fe_local = [zeros(4) for _ = 1:num_threads]
 
-    # Track time per color
-    color_times = zeros(length(e2e_colors))
-
     # Loop over colors
     for (ic, elements) in enumerate(e2e_colors)
-        t_color = time()
-
         # All elements in this color can be assembled in parallel (no conflicts)
         Threads.@threads for iel in elements
             tid = Threads.threadid()
@@ -522,8 +704,9 @@ function assemble_system(mesh::Mesh, elem::Q1Element,
             x = mesh.vertex_x[nodes]
             y = mesh.vertex_y[nodes]
 
-            # Assemble element
-            assemble_element!(Ke, fe, elem, x, y, ax_func, ay_func, f_func)
+            # Assemble MFEM element and get basis functions
+            phi = compute_mfem_element!(Ke, fe, elem, ratio, x, y, ax_func, ay_func, f_func)
+            basis_functions[iel] = phi
 
             # Scatter to global arrays (no race condition within same color)
             for i = 1:4
@@ -532,130 +715,16 @@ function assemble_system(mesh::Mesh, elem::Q1Element,
 
                 for j = 1:4
                     gj = nodes[j]
-                    if use_lookup
-                        k = get(lookup[gi], gj, -1)
-                    else
-                        k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
-                    end
+                    k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
                     if k > 0
                         mat_values[k] += Ke[i, j]
                     end
                 end
             end
         end
-
-        color_times[ic] = time() - t_color
     end
 
-    return mat_values, rhs, color_times, lookup_time
-end
-
-"""
-Partition elements into chunks for coarse-grained task spawning
-"""
-function partition_elements(elements::Vector{Int}, nchunks::Int)
-    n = length(elements)
-    if n <= nchunks
-        # If fewer elements than chunks, each element gets its own chunk
-        return [[e] for e in elements]
-    end
-
-    chunk_size = div(n + nchunks - 1, nchunks)  # Ceiling division
-    chunks = Vector{Int}[]
-
-    for i in 1:chunk_size:n
-        push!(chunks, elements[i:min(i+chunk_size-1, n)])
-    end
-
-    return chunks
-end
-
-"""
-Assemble global system using @spawn with chunked tasks (Krysl's approach)
-Returns: mat_values, rhs, color_times, lookup_time
-"""
-function assemble_system_spawn(mesh::Mesh, elem::Q1Element,
-                               n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
-                               e2e_colors::Vector{Vector{Int}},
-                               ax_func::Function, ay_func::Function, f_func::Function;
-                               use_lookup::Bool=true,
-                               nchunks_per_color::Int=0)
-    nnodes = length(mesh.vertex_x)
-    nnz = length(n2n_col_idx)
-
-    # Initialize global arrays
-    mat_values = zeros(nnz)
-    rhs = zeros(nnodes)
-
-    # Build lookup table for fast matrix access (O(1) instead of O(log n))
-    t_lookup = time()
-    lookup = use_lookup ? build_lookup_table(nnodes, n2n_row_ptr, n2n_col_idx) : nothing
-    lookup_time = time() - t_lookup
-
-    # Thread-local element matrices
-    num_threads = Threads.nthreads()
-    Ke_local = [zeros(4, 4) for _ = 1:num_threads]
-    fe_local = [zeros(4) for _ = 1:num_threads]
-
-    # Determine number of chunks per color
-    if nchunks_per_color == 0
-        nchunks_per_color = num_threads * 2  # 2x oversubscription for load balancing
-    end
-
-    # Track time per color
-    color_times = zeros(length(e2e_colors))
-
-    # Loop over colors (sequential - ensures no race conditions)
-    for (ic, elements) in enumerate(e2e_colors)
-        t_color = time()
-
-        # Partition elements into chunks
-        chunks = partition_elements(elements, nchunks_per_color)
-
-        # Spawn tasks for each chunk (Krysl's pattern)
-        Threads.@sync begin
-            for chunk in chunks
-                Threads.@spawn begin
-                    tid = Threads.threadid()
-                    Ke = Ke_local[tid]
-                    fe = fe_local[tid]
-
-                    # Process all elements in this chunk
-                    for iel in chunk
-                        # Get element nodes
-                        nodes = mesh.cell_to_node[iel, :]
-                        x = mesh.vertex_x[nodes]
-                        y = mesh.vertex_y[nodes]
-
-                        # Assemble element
-                        assemble_element!(Ke, fe, elem, x, y, ax_func, ay_func, f_func)
-
-                        # Scatter to global arrays (no race condition within same color)
-                        for i = 1:4
-                            gi = nodes[i]
-                            rhs[gi] += fe[i]
-
-                            for j = 1:4
-                                gj = nodes[j]
-                                if use_lookup
-                                    k = get(lookup[gi], gj, -1)
-                                else
-                                    k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
-                                end
-                                if k > 0
-                                    mat_values[k] += Ke[i, j]
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        color_times[ic] = time() - t_color
-    end
-
-    return mat_values, rhs, color_times, lookup_time
+    return mat_values, rhs, basis_functions
 end
 
 # ============================================================================
@@ -709,6 +778,77 @@ function apply_boundary_conditions(n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector
 end
 
 # ============================================================================
+# Fine-Scale Solution Reconstruction
+# ============================================================================
+
+"""
+Reconstruct fine-scale solution from coarse solution using MFEM basis functions
+"""
+function reconstruct_fine_solution(mesh::Mesh, coarse_solution::Vector{Float64},
+                                  basis_functions::Vector{Matrix{Float64}}, ratio::Int)
+    nel = size(mesh.cell_to_node, 1)
+    nx_coarse = Int(sqrt(nel))  # Assuming square mesh
+    ny_coarse = nx_coarse
+
+    # Fine mesh dimensions
+    nx_fine = nx_coarse * ratio
+    ny_fine = ny_coarse * ratio
+    nfine = (nx_fine + 1) * (ny_fine + 1)
+
+    # Fine mesh coordinates and solution
+    fine_x = zeros(nfine)
+    fine_y = zeros(nfine)
+    fine_u = zeros(nfine)
+
+    # Build fine mesh
+    idx = 1
+    for j = 0:ny_fine
+        for i = 0:nx_fine
+            fine_x[idx] = Float64(i) / nx_fine
+            fine_y[idx] = Float64(j) / ny_fine
+            idx += 1
+        end
+    end
+
+    # Reconstruct solution element by element
+    for iel = 1:nel
+        # Coarse element indices
+        iel_1d = iel - 1
+        ix_coarse = iel_1d % nx_coarse
+        iy_coarse = iel_1d ÷ nx_coarse
+
+        # Coarse element nodes and solution values
+        nodes = mesh.cell_to_node[iel, :]
+        u_coarse_elem = coarse_solution[nodes]
+
+        # Basis functions for this element
+        phi = basis_functions[iel]
+
+        # Reconstruct fine solution: u_fine = phi * u_coarse
+        for iy_local = 0:ratio
+            for ix_local = 0:ratio
+                # Fine node global indices
+                ix_fine = ix_coarse * ratio + ix_local
+                iy_fine = iy_coarse * ratio + iy_local
+                fine_node = ix_fine + iy_fine * (nx_fine + 1) + 1
+
+                # Local fine node index
+                local_node = ix_local + iy_local * (ratio + 1) + 1
+
+                # Interpolate: u_fine = sum_i phi[local_node, i] * u_coarse[i]
+                u_val = 0.0
+                for i = 1:4
+                    u_val += phi[local_node, i] * u_coarse_elem[i]
+                end
+                fine_u[fine_node] = u_val
+            end
+        end
+    end
+
+    return fine_x, fine_y, fine_u
+end
+
+# ============================================================================
 # Output
 # ============================================================================
 
@@ -730,7 +870,7 @@ end
 
 function main()
     println("="^70)
-    println("Julia FEM Assembly Example (Thread-Parallel with Coloring)")
+    println("Julia 2D MFEM Assembly (Thread-Parallel with Coloring)")
     println("="^70)
     println()
 
@@ -755,16 +895,21 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 512, 512
-    println("Generating mesh: $nx x $ny Q1 elements")
+    nx, ny = 16, 16  # Coarse mesh (MFEM)
+    ratio = 8        # Fine grid refinement ratio per coarse element
+
+    println("Generating coarse mesh: $nx x $ny Q1 elements")
+    println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
+    println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
+    println()
 
     t0 = time()
     mesh = generate_mesh(nx, ny)
     mesh_time = time() - t0
 
-    println("  Number of elements: ", size(mesh.cell_to_node, 1))
-    println("  Number of nodes:    ", length(mesh.vertex_x))
-    println("  Mesh generation:    ", @sprintf("%.2f ms", mesh_time * 1000))
+    println("  Number of coarse elements: ", size(mesh.cell_to_node, 1))
+    println("  Number of coarse nodes:    ", length(mesh.vertex_x))
+    println("  Mesh generation:           ", @sprintf("%.2f ms", mesh_time * 1000))
     println()
 
     # ========================================================================
@@ -791,26 +936,18 @@ function main()
     # ========================================================================
 
     println("="^70)
-    println("Starting Assembly")
+    println("Starting MFEM Assembly")
     println("="^70)
 
     elem = Q1Element()
 
     t0 = time()
-    mat_values, rhs, color_times, lookup_time = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors,
-                                                                 ax, ay, f)
+    mat_values, rhs, basis_functions = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
+                                                            ax, ay, f)
     assembly_time = time() - t0
 
-    println("Assembly complete")
-    println("  Total assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
-    println("  Lookup table build:  ", @sprintf("%.2f ms", lookup_time * 1000))
-    println("  Element assembly:    ", @sprintf("%.2f ms", (assembly_time - lookup_time) * 1000))
-    println()
-    println("  Time per color:")
-    for ic = 1:length(e2e_colors)
-        println("    Color $ic (", length(e2e_colors[ic]), " elements): ",
-                @sprintf("%.2f ms", color_times[ic] * 1000))
-    end
+    println("MFEM assembly complete")
+    println("  Assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
     println()
 
     # ========================================================================
@@ -848,19 +985,43 @@ function main()
     println()
 
     # ========================================================================
+    # Reconstruct Fine-Scale Solution
+    # ========================================================================
+
+    println("Reconstructing fine-scale solution...")
+
+    # Expand coarse solution to full DOFs (BCs = 0)
+    coarse_solution = zeros(length(mesh.vertex_x))
+    for i = 1:nfree
+        coarse_solution[free_to_global[i]] = sol_free[i]
+    end
+
+    t0 = time()
+    fine_x, fine_y, fine_u = reconstruct_fine_solution(mesh, coarse_solution, basis_functions, ratio)
+    reconstruct_time = time() - t0
+
+    println("  Fine mesh size: ", length(fine_u), " nodes")
+    println("  Reconstruction time: ", @sprintf("%.2f ms", reconstruct_time * 1000))
+    println()
+
+    # ========================================================================
     # Output
     # ========================================================================
 
-    println("Writing solution to file...")
+    println("Writing solutions to files...")
 
-    # Expand to full solution (BCs = 0)
-    solution = zeros(length(mesh.vertex_x))
-    for i = 1:nfree
-        solution[free_to_global[i]] = sol_free[i]
+    # Write coarse solution
+    write_solution("julia/mfem_solution_coarse.txt", mesh, coarse_solution)
+    println("  Coarse solution written to: julia/mfem_solution_coarse.txt")
+
+    # Write fine solution
+    open("julia/mfem_solution_fine.txt", "w") do io
+        println(io, "# x y u")
+        for i = 1:length(fine_u)
+            @printf(io, "%.6f %.6f %.6e\n", fine_x[i], fine_y[i], fine_u[i])
+        end
     end
-
-    write_solution("julia/solution.txt", mesh, solution)
-    println("  Solution written to: julia/solution.txt")
+    println("  Fine solution written to: julia/mfem_solution_fine.txt")
     println()
 
     # ========================================================================
@@ -872,23 +1033,32 @@ function main()
     println("="^70)
     println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
     println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
-    println("  Assembly:           ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", assembly_time * 1000))
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
+    println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^68)
-    total_time = mesh_time + conn_time + assembly_time + bc_time + solve_time
+    total_time = mesh_time + conn_time + assembly_time + bc_time + solve_time + reconstruct_time
     println("  Total:              ", @sprintf("%8.2f ms", total_time * 1000))
     println()
 
     # Solution statistics
+    println("Coarse solution statistics:")
     minval = minimum(sol_free)
     maxval = maximum(sol_free)
     avgval = sum(sol_free) / length(sol_free)
-
-    println("Solution statistics:")
     println("  Min value: ", @sprintf("%.6e", minval))
     println("  Max value: ", @sprintf("%.6e", maxval))
     println("  Avg value: ", @sprintf("%.6e", avgval))
+    println()
+
+    println("Fine solution statistics:")
+    minval_fine = minimum(fine_u)
+    maxval_fine = maximum(fine_u)
+    avgval_fine = sum(fine_u) / length(fine_u)
+    println("  Min value: ", @sprintf("%.6e", minval_fine))
+    println("  Max value: ", @sprintf("%.6e", maxval_fine))
+    println("  Avg value: ", @sprintf("%.6e", avgval_fine))
     println()
 end
 

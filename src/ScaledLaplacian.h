@@ -247,7 +247,7 @@ class ScaledLaplacian
   )
   {
     /// TODO Could we generalize the routine by introducing ElementType as template parameter
-    using ElementType = fe2DQ1Cuda;
+    using ElementType = fe2DQ1;
 
     constexpr int dim    = 2;
     constexpr int nNodes = ElementType::numNode;
@@ -701,7 +701,6 @@ struct MFEMAssemblyFunctor
         }
       }
     });
-    teamMember.team_barrier();
 
     // Initialize K_b matrix values to zero
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, actualNnz_b), [&](int i) {

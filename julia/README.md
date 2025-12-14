@@ -38,3 +38,55 @@ julia/openmp_assembly.jl
 
   The output file julia/solution.txt contains the solution in simple format (x, y, u values).
 
+
+julia/mfem_assembly.jl
+
+  Key Features
+
+  1. MFEM (Multiscale Finite Element Method) Implementation:
+  - Each coarse element is subdivided into a fine grid (ratio × ratio fine elements)
+  - Basis functions computed by solving local problems on fine grids
+  - Static condensation: boundary conditions from Q1 interpolation, interior solved harmonically
+  - Partition of unity: solves only 3 basis functions, computes 4th as φ₄ = 1 - φ₁ - φ₂ - φ₃
+
+  2. Varying Coefficients:
+  - ax(x, y, z) = 1.0 + 0.5 * sin(2π*x) * cos(2π*y)
+  - ay(x, y, z) = 1.0 + 0.5 * cos(2π*x) * sin(2π*y)
+  - f(x, y, z) = 2π² * sin(π*x) * sin(π*y)
+
+  3. Homogeneous Dirichlet Boundary Conditions:
+  - Applied on all domain boundaries
+  - DOF mapping to eliminate boundary nodes
+
+  4. Built-in Linear Solver:
+  - Uses Julia's backslash operator \ (sparse direct solver)
+  - Handles the reduced system after BCs
+
+  5. Thread-Parallel Assembly:
+  - Uses Threads.@threads for parallel element assembly
+  - Graph coloring ensures race-free assembly (no atomic operations needed)
+
+  Usage
+
+  Run with:
+  julia --threads=auto julia/mfem_assembly.jl
+
+  Or specify thread count:
+  julia --threads=8 julia/mfem_assembly.jl
+
+  Configuration
+
+  Edit these parameters in main():
+  - nx, ny = 16, 16: Coarse mesh resolution
+  - ratio = 8: Fine grid refinement (effective resolution: 128×128)
+  - Coefficient functions: ax, ay, f
+
+  Output
+
+  Creates julia/mfem_solution.txt with format:
+  # x y u
+  0.000000 0.000000 0.000000e+00
+  ...
+
+  The code follows the same structure as your existing openmp_assembly.jl but implements the full MFEM algorithm with local fine-grid solves for basis function computation, matching the C++ implementation in src/ScaledLaplacianHost.h.
+

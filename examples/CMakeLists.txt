@@ -147,3 +147,40 @@ else()
   message(STATUS "OpenMP assembly example disabled (Kokkos_ENABLE_OPENMP not set)")
 endif()
 
+#
+# MFEM assembly example with OpenMP (requires Kokkos with OpenMP support)
+# Uses ScaledLaplacian with MFEM_L elements and Kokkos::OpenMP execution space
+#
+if(Kokkos_ENABLE_OPENMP)
+  add_executable(
+          mfem_assembly.exe
+          mfem_assembly.cpp
+  )
+
+  if(USE_TACHO)
+    target_include_directories(mfem_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
+    )
+
+    target_link_libraries(mfem_assembly.exe
+            PUBLIC
+            imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  else()
+    target_include_directories(mfem_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
+    )
+
+    target_link_libraries(mfem_assembly.exe
+            PUBLIC
+            imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+    )
+  endif()
+
+  message(STATUS "MFEM assembly example enabled")
+else()
+  message(STATUS "MFEM assembly example disabled (Kokkos_ENABLE_OPENMP not set)")
+endif()
+

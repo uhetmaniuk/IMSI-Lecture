@@ -36,8 +36,8 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 16; // 2048
-    dParams.numElePerDir[1] = 16; // 2048
+    dParams.numElePerDir[0] = 32; // Coarse mesh: 32x32 elements
+    dParams.numElePerDir[1] = 32; // Fine mesh: 1024x1024 (ratio=32)
     dParams.omega           = IMSI::DomainType::Rectangle;
     dParams.cellType        = IMSI::ElementType::MFEM_L;
     //
