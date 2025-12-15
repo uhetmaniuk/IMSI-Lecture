@@ -644,7 +644,7 @@ ScaledLaplacianHost::GetLinearSystem(
   Kokkos::parallel_reduce(
       "MaxDofsPerEle",
       Kokkos::RangePolicy<Device>(0, meshInfo.mesh.NumberCells()),
-      KOKKOS_LAMBDA(const int& i, size_t& nMax) { nMax = std::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i))); },
+      [&](const int& i, size_t& nMax) { nMax = std::max<size_t>(nMax, size(meshInfo.mesh.NodeList(i))); },
       Kokkos::Max<size_t>(maxNumDofsPerEle));
 
   auto const& c2e  = meshInfo.c2e;
@@ -669,7 +669,7 @@ ScaledLaplacianHost::GetLinearSystem(
     Kokkos::parallel_for(
         "ScalarAssembly",
         Kokkos::TeamPolicy<Device>(offSetLen, Kokkos::AUTO).set_scratch_size(0, Kokkos::PerThread(totalScratchSize)),
-        KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
+        [&](const typename Kokkos::TeamPolicy<Device>::member_type& team) {
           auto const ik = team.league_rank();
 
           // Use scratch memory instead of heap allocation
@@ -840,7 +840,7 @@ ScaledLaplacianHost::GetLinearSystem(
         "SIMDAssembly",
         Kokkos::TeamPolicy<Device>((numEle - offSetLen) / vecSize, Kokkos::AUTO)
             .set_scratch_size(0, Kokkos::PerThread(totalScratchSize_SIMD)),
-        KOKKOS_LAMBDA(const typename Kokkos::TeamPolicy<Device>::member_type& team) {
+        [&](const typename Kokkos::TeamPolicy<Device>::member_type& team) {
           // Use scratch memory instead of heap allocation
           simd_type* rele_v        = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_rele_v);
           simd_type* kele_v        = (simd_type*)team.thread_scratch(0).get_shmem(scratchSize_kele_v);
