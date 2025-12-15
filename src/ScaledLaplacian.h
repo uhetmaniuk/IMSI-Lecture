@@ -347,7 +347,7 @@ struct MFEMAssemblyFunctor
   Kokkos::View<int*, ExecutionSpace>    cellTypes;
   Kokkos::View<double*, ExecutionSpace> nodeCoords;
   Kokkos::View<int**, ExecutionSpace>   cellToNode;
-  int                                   numEle;
+  size_t                                numEle;
 
   // Quadrature data
   Kokkos::View<double*, ExecutionSpace> quadWeight;
@@ -387,7 +387,7 @@ struct MFEMAssemblyFunctor
   operator()(const team_member& teamMember) const
   {
     // Get element index
-    const int ieleCoarse = teamMember.league_rank();
+    auto const ieleCoarse = teamMember.league_rank();
 
     // Allocate scratch pad memory at team level (level 1)
     // 2 vectors of size numFineNodes
@@ -396,13 +396,13 @@ struct MFEMAssemblyFunctor
     // Extract globalToFree and freeToGlobal mappings for interior DOFs
     // Interior DOFs are those where (ix > 0) && (ix < ratio) && (iy > 0) && (iy < ratio)
     // Number of free DOFs = (ratio-1) * (ratio-1)
-    int const      numFreeDofs = (ratio - 1) * (ratio - 1);
+    auto const     numFreeDofs = (ratio - 1) * (ratio - 1);
     scratch_int_1d globalToFree(teamMember.team_scratch(1), numFineNodes);
     scratch_int_1d freeToGlobal(teamMember.team_scratch(1), numFreeDofs);
 
     // Extract globalToBoundary and boundaryToGlobal mappings for boundary DOFs
     // Boundary DOFs are those where (ix == 0) || (ix == ratio) || (iy == 0) || (iy == ratio)
-    int const      numBoundaryDofs = numFineNodes - numFreeDofs;  // 128 for ratio=32
+    auto const     numBoundaryDofs = numFineNodes - numFreeDofs;  // 128 for ratio=32
     scratch_int_1d globalToBoundary(teamMember.team_scratch(1), numFineNodes);
     scratch_int_1d boundaryToGlobal(teamMember.team_scratch(1), numBoundaryDofs);
 
@@ -476,7 +476,7 @@ struct MFEMAssemblyFunctor
     // Build boundary basis functions in parallel (skip corners)
     // Left and right edges (ix = 0 and ix = ratio)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, 1, ratio), [&](int is) {
-      double const s = double(is) / double(ratio);  // abscissa along an edge
+      auto const s = double(is) / double(ratio);  // abscissa along an edge
       // Left edge (ix = 0)
       int in                     = is * (ratio + 1);
       phi(in + 0 * numFineNodes) = 1.0 - s;  // Basis function 0
@@ -489,7 +489,7 @@ struct MFEMAssemblyFunctor
 
     // Bottom and top edges (iy = 0 and iy = ratio, skip corners)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, 1, ratio), [&](int is) {
-      double const s = double(is) / double(ratio);  // abscissa along an edge
+      auto const s = double(is) / double(ratio);  // abscissa along an edge
       // Bottom edge (iy = 0)
       int in                     = is;
       phi(in + 0 * numFineNodes) = 1.0 - s;  // Basis function 0
@@ -513,11 +513,11 @@ struct MFEMAssemblyFunctor
           int const iy      = iGlobal / (ratio + 1);
 
           // Count interior neighbors only
-          int       count    = 1;  // Diagonal
-          int const hasWest  = (ix > 1);
-          int const hasEast  = (ix < ratio - 1);
-          int const hasSouth = (iy > 1);
-          int const hasNorth = (iy < ratio - 1);
+          int        count    = 1;  // Diagonal
+          auto const hasWest  = (ix > 1);
+          auto const hasEast  = (ix < ratio - 1);
+          auto const hasSouth = (iy > 1);
+          auto const hasNorth = (iy < ratio - 1);
 
           // South neighbors (iy - 1 row)
           if (hasSouth) {
@@ -544,7 +544,7 @@ struct MFEMAssemblyFunctor
     teamMember.team_barrier();
 
     // Now allocate colIdx and values for K_ii with the exact number of non-zeros
-    int const         actualNnz_ii = matRowPtr_ii(numFreeDofs);
+    auto const        actualNnz_ii = matRowPtr_ii(numFreeDofs);
     scratch_int_1d    matColIdx_ii(teamMember.team_scratch(1), actualNnz_ii);
     scratch_double_1d matValues_ii(teamMember.team_scratch(1), actualNnz_ii);
 
@@ -642,9 +642,9 @@ struct MFEMAssemblyFunctor
           int const iy      = iGlobal / (ratio + 1);
 
           // Count all neighbors (interior and boundary) in global numbering
-          int       count   = 1;  // Diagonal
-          int const hasWest = (ix > 0);
-          int const hasEast = (ix < ratio);
+          int        count   = 1;  // Diagonal
+          auto const hasWest = (ix > 0);
+          auto const hasEast = (ix < ratio);
           count += hasWest + hasEast;  // W and E neighbors
           if (iy > 0) {
             count += 1 + hasWest + hasEast;
@@ -835,11 +835,11 @@ struct MFEMAssemblyFunctor
     // Initialize utmp with Q1 basis functions for good initial guess
     // For each interior node, compute parametric coordinates and evaluate Q1 basis
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree) {
-      int const    iGlobal   = freeToGlobal(iFree);
-      int const    ix        = iGlobal % (ratio + 1);
-      int const    iy        = iGlobal / (ratio + 1);
-      double const xi_param  = double(ix) / double(ratio);  // Parametric coords in [0,1]
-      double const eta_param = double(iy) / double(ratio);
+      int const  iGlobal   = freeToGlobal(iFree);
+      int const  ix        = iGlobal % (ratio + 1);
+      int const  iy        = iGlobal / (ratio + 1);
+      auto const xi_param  = double(ix) / double(ratio);  // Parametric coords in [0,1]
+      auto const eta_param = double(iy) / double(ratio);
       // Q1 basis functions: N0 = (1-xi)(1-eta), N1 = xi(1-eta), N2 = xi*eta
       utmp(iFree + 0 * numFreeDofs) = (1.0 - xi_param) * (1.0 - eta_param);  // Corner 0
       utmp(iFree + 1 * numFreeDofs) = xi_param * (1.0 - eta_param);          // Corner 1
@@ -878,8 +878,8 @@ struct MFEMAssemblyFunctor
     // Reconstruct full basis functions by combining boundary (phi) and interior (utmp) values
     // Phi was initialized with boundary basis functions; now add interior solution
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int iFree) {
-      int const iGlobal = freeToGlobal(iFree);
-      double    sum     = 0;
+      auto const iGlobal = freeToGlobal(iFree);
+      double     sum     = 0;
       for (int ir = 0; ir < numVectorsToSolve; ++ir) {
         phi(iGlobal + ir * numFineNodes) = utmp(iFree + ir * numFreeDofs);
         sum += utmp(iFree + ir * numFreeDofs);
@@ -1003,7 +1003,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     throw std::runtime_error("Only 2D supported in CUDA version");
   }
 
-  printf("Number of colors: %d\n", c2e.numRows());
+  printf("Number of colors: %ld\n", c2e.numRows());
 
   // Copy mesh data to device
   auto meshData_d = CopyMeshToDevice();
@@ -1025,7 +1025,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystem(
     auto const numEle = c2e.row_map(ic + 1) - c2e.row_map(ic);
     if (numEle == 0)
       continue;
-    printf("  Color %d: %d elements\n", ic, numEle);
+    printf("  Color %d: %ld elements\n", ic, numEle);
 
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
