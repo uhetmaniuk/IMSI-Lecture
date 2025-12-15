@@ -543,8 +543,8 @@ SymmetricSparse<Scalar>::symbolicFactorization(int*& SNODE, int*& IWORK, int& IW
   int order_opt = 1;
   //
   int NNZA, NADJ, IWMAX, MAXSUP, NTOT;
-  int NNZL, NSUB, NLNZ;
-  int TMPSIZ, RWSIZE;
+  int NNZL, NSUB;
+  //int NLNZ, TMPSIZ, RWSIZE; // Seems unused
 
   int OPTIONS[8];
   //

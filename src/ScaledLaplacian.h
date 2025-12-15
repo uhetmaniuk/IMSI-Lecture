@@ -127,7 +127,7 @@ class ScaledLaplacian
   void
   OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const;
 
-  int const ratio = 32;  // For MFEM_L fine mesh refinement
+  static constexpr int ratio = 32;  // For MFEM_L fine mesh refinement
 
  protected:
   const MeshConnectivity<> meshInfo;
@@ -223,6 +223,7 @@ class ScaledLaplacian
     return data;
   }
 
+ public:
   /// \brief Device kernel for Q1 element assembly
   ///
   /// Computes element stiffness matrix and RHS for a single Q1 element
@@ -1121,7 +1122,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     throw std::runtime_error("Only 2D supported in CUDA version");
   }
 
-  printf("Number of colors: %d\n", c2e.numRows());
+  printf("Number of colors: %ld\n", c2e.numRows());
 
   // Copy mesh data to device
   auto meshData_d = CopyMeshToDevice();
@@ -1150,7 +1151,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
     auto const numEle = c2e.row_map(ic + 1) - c2e.row_map(ic);
     if (numEle == 0)
       continue;
-    printf("  Color %d: %d elements\n", ic, numEle);
+    printf("  Color %d: %ld elements\n", ic, numEle);
 
     // Copy element list to device (eleList from rowConst is host-side!)
     Kokkos::View<int*, ExecutionSpace> eleList_d("eleList", numEle);
@@ -1259,6 +1260,9 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
   Kokkos::View<const double*, ExecutionSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>> uCoarse_d(
       uCoarse, (numEleX + 1) * (numEleY + 1));
 
+  // Capture member variable for device lambda (avoid implicit 'this' capture)
+  auto phiMFEM_local = phiMFEM_d;
+
   // Parallel reconstruction over coarse elements on device
   Kokkos::parallel_for(
       "MFEM_Reconstruction",
@@ -1281,7 +1285,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
             double uVal   = 0.0;
             for (int k = 0; k < 4; ++k) {
               int const phiIdx = jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1);
-              uVal += phiMFEM_d(eleID, phiIdx) * uTrace[k];
+              uVal += phiMFEM_local(eleID, phiIdx) * uTrace[k];
             }
             uFine_d(nodeID) = uVal;
           }
