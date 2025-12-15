@@ -27,8 +27,12 @@ main(int argc, char* argv[])
   //
   for (int ii = 0; ii < argc; ++ii) {
     std::string arg = argv[ii];
-    if (arg.compare("--simd") == 0) { useSIMD = true; }
-    if (arg.compare("--nocolor") == 0) { useColoring = false; }
+    if (arg.compare("--simd") == 0) {
+      useSIMD = true;
+    }
+    if (arg.compare("--nocolor") == 0) {
+      useColoring = false;
+    }
   }
   Kokkos::initialize(argc, argv);
   {
@@ -36,15 +40,21 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 32; // Coarse mesh: 32x32 elements
-    dParams.numElePerDir[1] = 32; // Fine mesh: 1024x1024 (ratio=32)
+    dParams.numElePerDir[0] = 32;  // Coarse mesh: 32x32 elements
+    dParams.numElePerDir[1] = 32;  // Fine mesh: 1024x1024 (ratio=32)
     dParams.omega           = IMSI::DomainType::Rectangle;
     dParams.cellType        = IMSI::ElementType::MFEM_L;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
-    if (dParams.cellType == IMSI::ElementType::MFEM_L) { std::cout << " MFEM_L (-Q1) discretization \n"; }
-    if (dParams.cellType == IMSI::ElementType::Q1) { std::cout << " Q1 discretization \n"; }
-    if (dParams.cellType == IMSI::ElementType::Q2) { std::cout << " Q2 discretization \n"; }
+    if (dParams.cellType == IMSI::ElementType::MFEM_L) {
+      std::cout << " MFEM_L (-Q1) discretization \n";
+    }
+    if (dParams.cellType == IMSI::ElementType::Q1) {
+      std::cout << " Q1 discretization \n";
+    }
+    if (dParams.cellType == IMSI::ElementType::Q2) {
+      std::cout << " Q2 discretization \n";
+    }
     //
     auto                          start  = std::chrono::high_resolution_clock::now();
     auto                          myMesh = IMSI::GenerateMesh(dParams);
@@ -62,25 +72,31 @@ main(int argc, char* argv[])
     auto const                                  numDofs = meshData.mesh.NumberVertices();
     Kokkos::View<size_t*, host_execution_space> matRowPtr("Row Pointer Matrix", numDofs + 1);
     Kokkos::deep_copy(matRowPtr, meshData.n2n.row_map);
-    Kokkos::View<int*, host_execution_space> matColIdx("Column Index Matrix", meshData.n2n.entries.size());
+    Kokkos::View<int*, host_execution_space> matColIdx(
+        "Column Index Matrix", meshData.n2n.entries.size());
     Kokkos::deep_copy(matColIdx, meshData.n2n.entries);
     Kokkos::View<double*, host_execution_space> matValues("Values Matrix", matColIdx.size());
     Kokkos::View<double*, host_execution_space> rhsValues("Values RHS", numDofs);
     //
     const IMSI::ParabolicPb2 problem;
     start = std::chrono::high_resolution_clock::now();
-    IMSI::ScaledLaplacianHost dataAssembly(meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
+    IMSI::ScaledLaplacianHost dataAssembly(
+        meshData, problem.ax, problem.ay, problem.f, IMSI::RuleType::Gauss, 4);
     if (useColoring) {
       if ((useSIMD) && (dParams.cellType != IMSI::ElementType::MFEM_L)) {
-        dataAssembly.GetLinearSystem<host_execution_space, true>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, true>(
+            rhsValues, matRowPtr, matColIdx, matValues);
       } else {
-        dataAssembly.GetLinearSystem<host_execution_space, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, false>(
+            rhsValues, matRowPtr, matColIdx, matValues);
       }
     } else {
       if ((useSIMD) && (dParams.cellType != IMSI::ElementType::MFEM_L)) {
-        dataAssembly.GetLinearSystem<host_execution_space, true, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, true, false>(
+            rhsValues, matRowPtr, matColIdx, matValues);
       } else {
-        dataAssembly.GetLinearSystem<host_execution_space, false, false>(rhsValues, matRowPtr, matColIdx, matValues);
+        dataAssembly.GetLinearSystem<host_execution_space, false, false>(
+            rhsValues, matRowPtr, matColIdx, matValues);
       }
     }
     end = std::chrono::high_resolution_clock::now();
@@ -96,15 +112,17 @@ main(int argc, char* argv[])
     //
     //--- Solve the linear system
     //
-    Kokkos::View<double*, host_execution_space> u("Value for approximation", myMesh.NumberVertices());
+    Kokkos::View<double*, host_execution_space> u(
+        "Value for approximation", myMesh.NumberVertices());
     {
-      Kokkos::View<int*, host_execution_space> newRowPtr("Row Pointer for free degrees", size(freeToGlobal) + 1);
-      int                                      newNNZ = 0;
+      Kokkos::View<int*, host_execution_space> newRowPtr(
+          "Row Pointer for free degrees", size(freeToGlobal) + 1);
+      int newNNZ = 0;
       Kokkos::parallel_reduce(
           Kokkos::RangePolicy<host_execution_space>(0, size(freeToGlobal)),
-          KOKKOS_LAMBDA(int i, int& count) {
-            auto   gDof   = freeToGlobal[i];
-            size_t iCount = 0;
+          [&](int i, int& count) {
+            auto gDof   = freeToGlobal[i];
+            int  iCount = 0;
             for (auto k = matRowPtr[gDof]; k < matRowPtr[gDof + 1]; ++k) {
               iCount += (globalToFree[matColIdx[k]] != -1);
             }
@@ -113,15 +131,18 @@ main(int argc, char* argv[])
           },
           Kokkos::Sum<int>(newNNZ));
       //
-      for (int i = 0; i < newRowPtr.size() - 1; ++i) { newRowPtr(i + 1) += newRowPtr(i); }
+      for (int i = 0; i < newRowPtr.size() - 1; ++i) {
+        newRowPtr(i + 1) += newRowPtr(i);
+      }
       //
       Kokkos::View<int*, host_execution_space>    newColIdx("Col Idx for free degrees", newNNZ);
       Kokkos::View<double*, host_execution_space> newValues("Values for free degrees", newNNZ);
-      Kokkos::View<double*, host_execution_space> newRHS("RHS for free degrees", size(freeToGlobal));
+      Kokkos::View<double*, host_execution_space> newRHS(
+          "RHS for free degrees", size(freeToGlobal));
       //
       auto const n = size(freeToGlobal);
       Kokkos::parallel_for(
-          "Fill free Matrix", Kokkos::RangePolicy<host_execution_space>(0, n), KOKKOS_LAMBDA(int iFree) {
+          "Fill free Matrix", Kokkos::RangePolicy<host_execution_space>(0, n), [&](int iFree) {
             auto   gdof = freeToGlobal[iFree];
             size_t pos  = newRowPtr[iFree];
             for (auto k = matRowPtr[gdof]; k < matRowPtr[gdof + 1]; ++k) {
@@ -136,14 +157,16 @@ main(int argc, char* argv[])
           });
       //
       Kokkos::View<double*, host_execution_space> uFree("Values for free degrees", n);
-      SymmetricSparse<double> Ktmp(n, newNNZ, newRowPtr.data(), newColIdx.data(), newValues.data(), true);
-      Kokkos::Timer           timer;
+      SymmetricSparse<double>                     Ktmp(
+          n, newNNZ, newRowPtr.data(), newColIdx.data(), newValues.data(), true);
+      Kokkos::Timer timer;
       Ktmp.factor();
       double facto_time = timer.seconds();
       timer.reset();
       Ktmp.Solve(1, newRHS.data(), uFree.data());
       double solve_time = timer.seconds();
       //
+#if defined(IMSI_USE_TACHO)
       /*
       Tacho::CrsMatrixBase<double, host_execution_type> h_A;
       h_A.setExternalMatrix(n, n, newNNZ, newRowPtr, newColIdx, newValues);
@@ -180,20 +203,16 @@ main(int argc, char* argv[])
         std::cout << "TachoSolver: residual = " << res << "\n";
       }
       */
+#endif
       std::cout << std::endl;
       std::cout << " Facto Time " << facto_time << std::endl;
       std::cout << " Solve Time " << solve_time << std::endl;
       std::cout << std::endl;
       //
-      //      auto ufree = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(x, Kokkos::ALL, 0));
-      //      for (int ii = 0; ii < std::min<int>(n, 128); ++ii) {
-      //        printf(" u %e z %e diff %e \n", ufree[ii], z[ii], ufree[ii] - z[ii]);
-      //      }
-      Kokkos::parallel_for(
-          "Fill u", Kokkos::RangePolicy<host_execution_space>(0, n), KOKKOS_LAMBDA(int i) {
-            auto dof = freeToGlobal[i];
-            u[dof]   = uFree[i];
-          });
+      Kokkos::parallel_for("Fill u", Kokkos::RangePolicy<host_execution_space>(0, n), [&](int i) {
+        auto dof = freeToGlobal[i];
+        u[dof]   = uFree[i];
+      });
     }
     //
     //--- Compute error norms
