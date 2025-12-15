@@ -177,7 +177,7 @@ SortEntries(Kokkos::StaticCrsGraph<Idx, Space>& g)
   // TO DO: Check why Kokkos::sort is expensive
   Kokkos::parallel_for(
       Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0, g.numRows()),
-      KOKKOS_LAMBDA(int i) { std::sort(&h_entries(h_row(i)), &h_entries(h_row(i + 1))); });
+      [=](int i) { std::sort(&h_entries(h_row(i)), &h_entries(h_row(i + 1))); });
   Kokkos::deep_copy(g.entries, h_entries);
 }
 
