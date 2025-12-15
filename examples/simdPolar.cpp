@@ -28,8 +28,8 @@ main(int argc, char** argv)
 
     for (int pk = 32; pk < 80000; pk *= 2) {
       for (int p = pk - 2; p <= pk + 2; p += 1) {
-        Kokkos::Random_XorShift64_Pool<> random_pool(/*seed=*/12345);
-        auto                             generator = random_pool.get_state();
+        Kokkos::Random_XorShift64_Pool<Kokkos::DefaultHostExecutionSpace> random_pool(/*seed=*/12345);
+        auto                                                               generator = random_pool.get_state();
 
         std::vector<real> x(p), y(p), z(p);
         for (int i = 0; i < p; ++i) {

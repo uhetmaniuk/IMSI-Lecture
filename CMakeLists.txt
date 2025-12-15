@@ -75,21 +75,11 @@ add_subdirectory(examples)
 add_executable(main.exe  main.cpp)
 
 if(USE_TACHO)
-  target_include_directories(main.exe
-          PUBLIC
-          imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos
-  )
-
   target_link_libraries(main.exe
           PUBLIC
           imsi_lib tacho Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
   )
 else()
-  target_include_directories(main.exe
-          PUBLIC
-          imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
-  )
-
   target_link_libraries(main.exe
           PUBLIC
           imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
