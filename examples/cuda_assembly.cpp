@@ -10,9 +10,11 @@
 ///
 
 #include <Kokkos_Core.hpp>
-#include <cmath>
-#include <functional>
 #include <iostream>
+#include <vector>
+
+// Defines Scalar, AxFunctor, AyFunctor, FFunctor
+#include "config_assembly.h"
 
 #include "../src/Element.h"
 #include "../src/Mesh.h"
@@ -23,36 +25,14 @@
 
 using namespace IMSI;
 
-// Define material coefficients and forcing term as functors at namespace scope
-// These must be KOKKOS_INLINE_FUNCTION compatible for device execution
-// NOTE: Must be at namespace scope for CUDA (cannot be local types in main())
-struct AxFunctor {
-  KOKKOS_INLINE_FUNCTION
-  double operator()(double x, double y, double z) const { return 1.0; }
-};
-
-struct AyFunctor {
-  KOKKOS_INLINE_FUNCTION
-  double operator()(double x, double y, double z) const { return 1.0; }
-};
-
-struct FFunctor {
-  KOKKOS_INLINE_FUNCTION
-  double operator()(double x, double y, double z) const {
-    // Manufactured solution: u = sin(pi*x) * sin(pi*y)
-    // => -Laplacian(u) = 2*pi^2 * sin(pi*x) * sin(pi*y)
-    constexpr double pi = 3.14159265358979323846;
-    using Kokkos::sin;  // Device-safe sin function
-    return 2.0 * pi * pi * sin(pi * x) * sin(pi * y);
-  }
-};
-
 int main(int argc, char* argv[])
 {
   Kokkos::initialize(argc, argv);
   {
     std::cout << "=== CUDA FEM Assembly Example ===" << std::endl;
     std::cout << "Kokkos execution space: " << typeid(Kokkos::DefaultExecutionSpace).name() << std::endl;
+    std::cout << "Precision: " << (sizeof(Scalar) == 4 ? "FP32 (float)" : "FP64 (double)")
+              << " (" << sizeof(Scalar) << " bytes)" << std::endl;
     std::cout << std::endl;
 
     // Check if CUDA is available
@@ -67,6 +47,40 @@ int main(int argc, char* argv[])
 #endif
 
     // ========================================================================
+    // Parse command line arguments
+    // ========================================================================
+
+    // Default values
+    int nx = 8;
+    int ny = 8;
+    IMSI::ElementType elementType = IMSI::ElementType::Q1;
+
+    // Parse command line arguments
+    for (int i = 1; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg == "-nx" && i + 1 < argc) {
+        nx = std::atoi(argv[++i]);
+      } else if (arg == "-ny" && i + 1 < argc) {
+        ny = std::atoi(argv[++i]);
+      } else if (arg == "-q1") {
+        elementType = IMSI::ElementType::Q1;
+      } else if (arg == "-mfem") {
+        elementType = IMSI::ElementType::MFEM_L;
+      } else if (arg == "-h" || arg == "--help") {
+        std::cout << "\nUsage: " << argv[0] << " [options]" << std::endl;
+        std::cout << "Options:" << std::endl;
+        std::cout << "  -nx <n>    Number of elements in x direction (default: 8)" << std::endl;
+        std::cout << "  -ny <n>    Number of elements in y direction (default: 8)" << std::endl;
+        std::cout << "  -q1        Use Q1 (bilinear) elements (default)" << std::endl;
+        std::cout << "  -mfem      Use MFEM_L (multiscale) elements" << std::endl;
+        std::cout << "  -h, --help Show this help message" << std::endl;
+        std::cout << "\nExample: " << argv[0] << " -nx 16 -ny 16 -q1" << std::endl;
+        Kokkos::finalize();
+        return 0;
+      }
+    }
+
+    // ========================================================================
     // Problem setup
     // ========================================================================
 
@@ -75,13 +89,14 @@ int main(int argc, char* argv[])
     // ========================================================================
 
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 8; // 2048
-    dParams.numElePerDir[1] = 8; // 2048
+    dParams.numElePerDir[0] = nx;
+    dParams.numElePerDir[1] = ny;
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::Q1; // MFEM_L
+    dParams.cellType        = elementType;
 
-    std::cout << "Generating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
-              << " Q1 elements" << std::endl;
+    std::string elementName = (elementType == IMSI::ElementType::Q1) ? "Q1" : "MFEM_L";
+    std::cout << "\nGenerating mesh: " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1]
+              << " " << elementName << " elements" << std::endl;
 
     auto mesh = IMSI::GenerateMesh(dParams);
     std::cout << "  Number of elements: " << mesh.NumberCells() << std::endl;
@@ -113,10 +128,10 @@ int main(int argc, char* argv[])
     std::cout << "  Non-zeros:   " << numNonZeros << std::endl;
 
     // Host views
-    Kokkos::View<double*, Kokkos::HostSpace> rhs_h("rhs_host", numNodes);
+    Kokkos::View<Scalar*, Kokkos::HostSpace> rhs_h("rhs_host", numNodes);
     Kokkos::View<size_t*, Kokkos::HostSpace> matRowPtr_h("matRowPtr_host", numNodes + 1);
     Kokkos::View<int*, Kokkos::HostSpace> matColIdx_h("matColIdx_host", numNonZeros);
-    Kokkos::View<double*, Kokkos::HostSpace> matValues_h("matValues_host", numNonZeros);
+    Kokkos::View<Scalar*, Kokkos::HostSpace> matValues_h("matValues_host", numNonZeros);
 
     // Copy graph structure from n2n
     for (size_t i = 0; i <= numNodes; ++i) {
@@ -128,10 +143,10 @@ int main(int argc, char* argv[])
     }
 
     // Device views
-    Kokkos::View<double*, Kokkos::Cuda> rhs_d("rhs_device", numNodes);
+    Kokkos::View<Scalar*, Kokkos::Cuda> rhs_d("rhs_device", numNodes);
     Kokkos::View<size_t*, Kokkos::Cuda> matRowPtr_d("matRowPtr_device", numNodes + 1);
     Kokkos::View<int*, Kokkos::Cuda> matColIdx_d("matColIdx_device", numNonZeros);
-    Kokkos::View<double*, Kokkos::Cuda> matValues_d("matValues_device", numNonZeros);
+    Kokkos::View<Scalar*, Kokkos::Cuda> matValues_d("matValues_device", numNonZeros);
 
     // Copy structure to device
     Kokkos::deep_copy(matRowPtr_d, matRowPtr_h);
@@ -155,7 +170,11 @@ int main(int argc, char* argv[])
         meshConn, RuleType::Gauss, 2, ax_func, ay_func, f_func);
 
     Kokkos::Timer timer;
-    scalarLap.GetLinearSystem(rhs_d, matRowPtr_d, matColIdx_d, matValues_d);
+    if (elementType == IMSI::ElementType::MFEM_L) {
+      scalarLap.GetLinearSystemMFEM(rhs_d, matRowPtr_d, matColIdx_d, matValues_d);
+    } else {
+      scalarLap.GetLinearSystem(rhs_d, matRowPtr_d, matColIdx_d, matValues_d);
+    }
     Kokkos::fence();
     double assemblyTime = timer.seconds();
 
@@ -190,8 +209,8 @@ int main(int argc, char* argv[])
     // Build reduced system
     std::vector<int> newRowPtr(numFreeDofs + 1, 0);
     std::vector<int> newColIdx;
-    std::vector<double> newValues;
-    std::vector<double> newRhs(numFreeDofs);
+    std::vector<Scalar> newValues;
+    std::vector<Scalar> newRhs(numFreeDofs);
 
     newRowPtr[0] = 0;
     for (size_t i = 0; i < numFreeDofs; ++i) {
@@ -216,7 +235,7 @@ int main(int argc, char* argv[])
 
     std::cout << "\nSolving linear system on host..." << std::endl;
 
-    SymmetricSparse<double> solver(
+    SymmetricSparse<Scalar> solver(
         numFreeDofs, newColIdx.size(), newRowPtr.data(), newColIdx.data(), newValues.data(), true);
 
     timer.reset();
@@ -224,7 +243,7 @@ int main(int argc, char* argv[])
     double factorTime = timer.seconds();
     std::cout << "  Factorization time: " << factorTime * 1000.0 << " ms" << std::endl;
 
-    std::vector<double> solution(numFreeDofs);
+    std::vector<Scalar> solution(numFreeDofs);
     timer.reset();
     solver.Solve(1, newRhs.data(), solution.data());
     double solveTime = timer.seconds();
@@ -236,13 +255,27 @@ int main(int argc, char* argv[])
 
     std::cout << "\nWriting solution to file..." << std::endl;
 
-    std::vector<double> fullSolution(numNodes, 0.0);
+    std::vector<Scalar> fullSolution(numNodes, 0.0);
     for (size_t i = 0; i < numFreeDofs; ++i) {
       fullSolution[freeToGlobal[i]] = solution[i];
     }
 
-    OutputToGMSH("cuda_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
-    std::cout << "  Solution written to: cuda_solution.msh" << std::endl;
+    double reconstructTime = 0.0;
+    if (elementType == IMSI::ElementType::MFEM_L) {
+      OutputToGMSH("cuda_coarse_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+      std::cout << "  Coarse solution written to: cuda_coarse_solution.msh" << std::endl;
+
+      // Reconstruct fine-scale solution
+      std::cout << "\nReconstructing fine-scale solution..." << std::endl;
+      timer.reset();
+      scalarLap.OutputMFEMFine(fullSolution.data(), nx, ny);
+      reconstructTime = timer.seconds();
+      std::cout << "  Fine-scale reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
+      std::cout << "  Fine solution written to: outputFine.txt" << std::endl;
+    } else {
+      OutputToGMSH("cuda_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+      std::cout << "  Solution written to: cuda_solution.msh" << std::endl;
+    }
 
     // ========================================================================
     // Performance summary
@@ -252,14 +285,20 @@ int main(int argc, char* argv[])
     std::cout << "Assembly time:       " << assemblyTime * 1000.0 << " ms" << std::endl;
     std::cout << "Factorization time:  " << factorTime * 1000.0 << " ms" << std::endl;
     std::cout << "Solve time:          " << solveTime * 1000.0 << " ms" << std::endl;
-    std::cout << "Total time:          " << (assemblyTime + factorTime + solveTime) * 1000.0 << " ms"
-              << std::endl;
+    if (elementType == IMSI::ElementType::MFEM_L) {
+      std::cout << "Reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
+      std::cout << "Total time:          " << (assemblyTime + factorTime + solveTime + reconstructTime) * 1000.0 << " ms"
+                << std::endl;
+    } else {
+      std::cout << "Total time:          " << (assemblyTime + factorTime + solveTime) * 1000.0 << " ms"
+                << std::endl;
+    }
     std::cout << std::endl;
 
     // Compute some solution statistics
-    double minVal = *std::min_element(solution.begin(), solution.end());
-    double maxVal = *std::max_element(solution.begin(), solution.end());
-    double avgVal = std::accumulate(solution.begin(), solution.end(), 0.0) / solution.size();
+    Scalar minVal = *std::min_element(solution.begin(), solution.end());
+    Scalar maxVal = *std::max_element(solution.begin(), solution.end());
+    Scalar avgVal = std::accumulate(solution.begin(), solution.end(), Scalar(0.0)) / solution.size();
 
     std::cout << "Solution statistics:" << std::endl;
     std::cout << "  Min value: " << minVal << std::endl;
