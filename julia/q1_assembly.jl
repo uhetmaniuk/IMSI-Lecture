@@ -12,18 +12,11 @@
 # - Thread-parallel assembly with graph coloring
 # - Built-in sparse solver (\)
 #
-# Performance Optimizations (inspired by FinEtoolsMultithreading.jl):
-# 1. Lookup table for O(1) matrix position finding (replaces linear search)
-# 2. Binary search fallback option (O(log n) vs O(n))
-# 3. Parallel transpose_graph with per-thread reduction
-# 4. Parallel combine_graphs for graph composition
-# 5. Parallel prefix sum for CSR construction
-# 6. Thread-parallel CSR row sorting
-#
 
 using SparseArrays
 using LinearAlgebra
 using Printf
+using PrecompileTools: @compile_workload
 
 # ============================================================================
 # Q1 Finite Element (2D Bilinear Quadrilateral)
@@ -31,52 +24,67 @@ using Printf
 
 """
 Q1 shape functions and gradients on reference element [-1,1]²
+Type parameters Dim and NNodes are compile-time constants
 """
-struct Q1Element
+struct Q1Element{Dim, NNodes}
     # Gauss quadrature points and weights for 2x2 rule
     qpts::Vector{Tuple{Float64, Float64}}
     qwts::Vector{Float64}
 
-    function Q1Element()
+    function Q1Element{Dim, NNodes}() where {Dim, NNodes}
         # 2x2 Gauss quadrature
         gp = 1.0 / sqrt(3.0)
         qpts = [(-gp, -gp), (gp, -gp), (gp, gp), (-gp, gp)]
         qwts = [1.0, 1.0, 1.0, 1.0]
-        new(qpts, qwts)
+        new{Dim, NNodes}(qpts, qwts)
+    end
+end
+
+# Convenience constructor
+Q1Element() = Q1Element{2, 4}()
+
+# Accessor methods to maintain compatibility
+Base.getproperty(::Q1Element{Dim, NNodes}, ::Val{:dim}) where {Dim, NNodes} = Dim
+Base.getproperty(::Q1Element{Dim, NNodes}, ::Val{:numNodes}) where {Dim, NNodes} = NNodes
+function Base.getproperty(elem::Q1Element, name::Symbol)
+    if name === :dim
+        return getproperty(elem, Val(:dim))
+    elseif name === :numNodes
+        return getproperty(elem, Val(:numNodes))
+    else
+        return getfield(elem, name)
     end
 end
 
 """
-Evaluate Q1 shape functions at (ξ, η)
-Returns: Vector of 4 shape function values [N1, N2, N3, N4]
+Evaluate Q1 shape functions at (ξ, η) - in-place version
+Fills N with 4 shape function values [N1, N2, N3, N4]
 Node ordering: (ξ,η) = [(-1,-1), (1,-1), (1,1), (-1,1)]
 """
-function shape_functions(ξ::Float64, η::Float64)
-    N = zeros(4)
-    N[1] = 0.25 * (1 - ξ) * (1 - η)
-    N[2] = 0.25 * (1 + ξ) * (1 - η)
-    N[3] = 0.25 * (1 + ξ) * (1 + η)
-    N[4] = 0.25 * (1 - ξ) * (1 + η)
-    return N
+function shape_functions!(N::Vector{Float64}, ξ::Float64, η::Float64)
+    @inbounds N[1] = 0.25 * (1 - ξ) * (1 - η)
+    @inbounds N[2] = 0.25 * (1 + ξ) * (1 - η)
+    @inbounds N[3] = 0.25 * (1 + ξ) * (1 + η)
+    @inbounds N[4] = 0.25 * (1 - ξ) * (1 + η)
+    return nothing
 end
 
 """
-Evaluate Q1 shape function gradients in reference coordinates
-Returns: 4x2 matrix where row i contains [∂Ni/∂ξ, ∂Ni/∂η]
+Evaluate Q1 shape function gradients in reference coordinates - in-place version
+Fills dN (4x2 matrix) where row i contains [∂Ni/∂ξ, ∂Ni/∂η]
 """
-function shape_gradients(ξ::Float64, η::Float64)
-    dN = zeros(4, 2)
+function shape_gradients!(dN::Matrix{Float64}, ξ::Float64, η::Float64)
     # ∂N/∂ξ
-    dN[1, 1] = -0.25 * (1 - η)
-    dN[2, 1] =  0.25 * (1 - η)
-    dN[3, 1] =  0.25 * (1 + η)
-    dN[4, 1] = -0.25 * (1 + η)
+    @inbounds dN[1, 1] = -0.25 * (1 - η)
+    @inbounds dN[2, 1] =  0.25 * (1 - η)
+    @inbounds dN[3, 1] =  0.25 * (1 + η)
+    @inbounds dN[4, 1] = -0.25 * (1 + η)
     # ∂N/∂η
-    dN[1, 2] = -0.25 * (1 - ξ)
-    dN[2, 2] = -0.25 * (1 + ξ)
-    dN[3, 2] =  0.25 * (1 + ξ)
-    dN[4, 2] =  0.25 * (1 - ξ)
-    return dN
+    @inbounds dN[1, 2] = -0.25 * (1 - ξ)
+    @inbounds dN[2, 2] = -0.25 * (1 + ξ)
+    @inbounds dN[3, 2] =  0.25 * (1 + ξ)
+    @inbounds dN[4, 2] =  0.25 * (1 - ξ)
+    return nothing
 end
 
 # ============================================================================
@@ -150,10 +158,11 @@ Transpose a graph stored as CSR (row_ptr, col_idx) - Parallel version
 """
 function transpose_graph(n::Int, m::Int, row_ptr::Vector{Int}, col_idx::Vector{Int})
     nnz = length(col_idx)
-    num_threads = Threads.nthreads()
+    # Use maxthreadid() to get the maximum possible thread ID (accounts for multiple thread pools)
+    max_tid = Threads.maxthreadid()
 
     # Phase 1: Count entries per column (parallel reduction)
-    col_counts_per_thread = [zeros(Int, m) for _ = 1:num_threads]
+    col_counts_per_thread = [zeros(Int, m) for _ = 1:max_tid]
 
     Threads.@threads for i = 1:n
         tid = Threads.threadid()
@@ -163,9 +172,9 @@ function transpose_graph(n::Int, m::Int, row_ptr::Vector{Int}, col_idx::Vector{I
         end
     end
 
-    # Reduce counts from all threads
+    # Reduce counts from all threads (only up to max_tid that was actually used)
     col_count = zeros(Int, m)
-    for tid = 1:num_threads
+    for tid = 1:max_tid
         col_count .+= col_counts_per_thread[tid]
     end
 
@@ -176,19 +185,18 @@ function transpose_graph(n::Int, m::Int, row_ptr::Vector{Int}, col_idx::Vector{I
         new_row_ptr[i + 1] = new_row_ptr[i] + col_count[i]
     end
 
-    # Phase 3: Fill new_col_idx (parallel with per-row atomics)
-    # We use a simpler approach: each row tracks its own fill position
+    # Phase 3: Fill new_col_idx (parallel with atomics)
     new_col_idx = zeros(Int, nnz)
-    col_offset = zeros(Int, m)
+    col_offset = [Threads.Atomic{Int}(0) for _ = 1:m]
 
-    # Sequential fill (safe and simple)
-    # Note: Could use atomic operations for true parallelism, but this is fast enough
-    for i = 1:n
+    # Parallel fill using atomic operations
+    Threads.@threads for i = 1:n
         for k = row_ptr[i]:row_ptr[i + 1] - 1
             j = col_idx[k]
-            pos = new_row_ptr[j] + col_offset[j]
+            # Atomically get and increment the offset for column j
+            offset = Threads.atomic_add!(col_offset[j], 1)
+            pos = new_row_ptr[j] + offset
             new_col_idx[pos] = i
-            col_offset[j] += 1
         end
     end
 
@@ -201,92 +209,53 @@ Combine two graphs: A → B and B → C to get A → C - Parallel version
 function combine_graphs(na::Int, nb::Int, nc::Int,
                        ab_row_ptr::Vector{Int}, ab_col_idx::Vector{Int},
                        bc_row_ptr::Vector{Int}, bc_col_idx::Vector{Int})
-    # Phase 1: Build sets in parallel
-    ac_sets = [Set{Int}() for _ = 1:na]
 
-    Threads.@threads for i = 1:na
-        for k1 = ab_row_ptr[i]:ab_row_ptr[i + 1] - 1
-            b = ab_col_idx[k1]
-            for k2 = bc_row_ptr[b]:bc_row_ptr[b + 1] - 1
-                c = bc_col_idx[k2]
-                push!(ac_sets[i], c)
-            end
-        end
-    end
-
-    # Phase 2: Compute row_ptr in parallel
-    ac_lengths = zeros(Int, na)
-    Threads.@threads for i = 1:na
-        ac_lengths[i] = length(ac_sets[i])
-    end
-
+    # Phase 1: Count unique entries
     ac_row_ptr = zeros(Int, na + 1)
     ac_row_ptr[1] = 1
+    c_flag = zeros(Int, nc)
     for i = 1:na
-        ac_row_ptr[i + 1] = ac_row_ptr[i] + ac_lengths[i]
+        my_length = 0
+        for k1 = ab_row_ptr[i]:ab_row_ptr[i + 1] - 1
+            @inbounds b = ab_col_idx[k1]
+            for k2 = bc_row_ptr[b]:bc_row_ptr[b + 1] - 1
+                @inbounds c = bc_col_idx[k2]
+                if (c_flag[c] < i)
+                    @inbounds c_flag[c] = i
+                    my_length += 1
+                end
+            end
+        end
+        ac_row_ptr[i + 1] = ac_row_ptr[i] + my_length
     end
 
-    # Phase 3: Fill col_idx in parallel
+    # Phase 2: Allocate column array
     nnz = ac_row_ptr[na + 1] - 1
     ac_col_idx = zeros(Int, nnz)
 
-    Threads.@threads for i = 1:na
-        if ac_lengths[i] > 0
-            start_pos = ac_row_ptr[i]
-            sorted_cols = sort(collect(ac_sets[i]))
-            for (j, c) in enumerate(sorted_cols)
-                ac_col_idx[start_pos + j - 1] = c
+    # Phase 3: Fill entries
+    fill!(c_flag, 0)
+    for i = 1:na
+        my_length = 0
+        for k1 = ab_row_ptr[i]:ab_row_ptr[i + 1] - 1
+            @inbounds b = ab_col_idx[k1]
+            for k2 = bc_row_ptr[b]:bc_row_ptr[b + 1] - 1
+                @inbounds c = bc_col_idx[k2]
+                if (c_flag[c] < i)
+                    @inbounds c_flag[c] = i
+                    @inbounds ac_col_idx[ac_row_ptr[i] + my_length] = c
+                    my_length += 1
+                end
             end
         end
     end
 
+    # Phase 4: Sort each row
+    Threads.@threads for i = 1:na
+        sort!(view(ac_col_idx, ac_row_ptr[i]:ac_row_ptr[i+1]-1))
+    end
+
     return ac_row_ptr, ac_col_idx
-end
-
-"""
-Parallel prefix sum (exclusive scan) using chunked algorithm
-Modifies arr in place to contain cumulative sums
-"""
-function parallel_prefix_sum!(arr::Vector{Int})
-    n = length(arr)
-    if n <= 1
-        return
-    end
-
-    num_threads = Threads.nthreads()
-    chunk_size = max(1, div(n, num_threads))
-
-    # Compute chunk boundaries
-    chunks = [(i*chunk_size+1):min((i+1)*chunk_size, n) for i = 0:num_threads-1]
-    filter!(c -> !isempty(c), chunks)
-    nchunks = length(chunks)
-
-    # Phase 1: Parallel scan within each chunk
-    chunk_sums = zeros(Int, nchunks)
-
-    Threads.@threads for i = 1:nchunks
-        chunk = chunks[i]
-        local_sum = 0
-        for j in chunk
-            temp = arr[j]
-            arr[j] = local_sum
-            local_sum += temp
-        end
-        chunk_sums[i] = local_sum
-    end
-
-    # Phase 2: Sequential scan of chunk sums
-    for i = 2:nchunks
-        chunk_sums[i] += chunk_sums[i-1]
-    end
-
-    # Phase 3: Parallel addition of chunk offsets
-    Threads.@threads for i = 2:nchunks
-        offset = chunk_sums[i-1]
-        for j in chunks[i]
-            arr[j] += offset
-        end
-    end
 end
 
 """
@@ -365,58 +334,100 @@ end
 # ============================================================================
 
 """
-Assemble element stiffness matrix and RHS for scaled Laplacian
+Workspace for element assembly (reused across elements to avoid allocations)
 """
-function assemble_element!(Ke::Matrix{Float64}, fe::Vector{Float64},
-                          elem::Q1Element,
+struct ElementWorkspace{T<:AbstractFloat, Dim, NNodes}
+    N::Vector{T}
+    dN_ref::Matrix{T}
+    dN_phys::Matrix{T}
+    J::Matrix{T}
+    invJ::Matrix{T}
+
+    function ElementWorkspace{T, Dim, NNodes}() where {T<:AbstractFloat, Dim, NNodes}
+        new{T, Dim, NNodes}(
+            zeros(T, NNodes),
+            zeros(T, NNodes, Dim),
+            zeros(T, NNodes, Dim),
+            zeros(T, Dim, Dim),
+            zeros(T, Dim, Dim)
+        )
+    end
+end
+
+"""
+Assemble element stiffness matrix and RHS for scaled Laplacian
+Templated on element type parameters for compile-time optimization
+Uses workspace to avoid allocations
+"""
+@inline function assemble_element!(Ke::Matrix{Float64}, fe::Vector{Float64},
+                          elem::Q1Element{Dim, NNodes},
+                          workspace::ElementWorkspace{Float64, Dim, NNodes},
                           x::Vector{Float64}, y::Vector{Float64},
-                          ax_func::Function, ay_func::Function, f_func::Function)
+                          ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
     fill!(Ke, 0.0)
     fill!(fe, 0.0)
 
+    # Use workspace arrays (no allocation!)
+    N = workspace.N
+    dN_ref = workspace.dN_ref
+    dN_phys = workspace.dN_phys
+    J = workspace.J
+    invJ = workspace.invJ
+
     # Loop over quadrature points
-    for (qp, (ξ, η)) in enumerate(elem.qpts)
+    @fastmath @inbounds for (qp, (ξ, η)) in enumerate(elem.qpts)
         w = elem.qwts[qp]
 
-        # Shape functions and gradients in reference coords
-        N = shape_functions(ξ, η)
-        dN_ref = shape_gradients(ξ, η)  # 4x2: [∂N/∂ξ, ∂N/∂η]
+        # Shape functions and gradients in reference coords (in-place)
+        shape_functions!(N, ξ, η)
+        shape_gradients!(dN_ref, ξ, η)
 
-        # Compute Jacobian
-        J = zeros(2, 2)
-        for i = 1:4
-            J[1, 1] += dN_ref[i, 1] * x[i]  # ∂x/∂ξ
-            J[1, 2] += dN_ref[i, 2] * x[i]  # ∂x/∂η
-            J[2, 1] += dN_ref[i, 1] * y[i]  # ∂y/∂ξ
-            J[2, 2] += dN_ref[i, 2] * y[i]  # ∂y/∂η
-        end
+        # Compute Jacobian (manually unrolled for better performance)
+        J[1, 1] = dN_ref[1, 1] * x[1] + dN_ref[2, 1] * x[2] + dN_ref[3, 1] * x[3] + dN_ref[4, 1] * x[4]
+        J[1, 2] = dN_ref[1, 2] * x[1] + dN_ref[2, 2] * x[2] + dN_ref[3, 2] * x[3] + dN_ref[4, 2] * x[4]
+        J[2, 1] = dN_ref[1, 1] * y[1] + dN_ref[2, 1] * y[2] + dN_ref[3, 1] * y[3] + dN_ref[4, 1] * y[4]
+        J[2, 2] = dN_ref[1, 2] * y[1] + dN_ref[2, 2] * y[2] + dN_ref[3, 2] * y[3] + dN_ref[4, 2] * y[4]
 
         detJ = J[1, 1] * J[2, 2] - J[1, 2] * J[2, 1]
-        invJ = [J[2, 2] -J[1, 2]; -J[2, 1] J[1, 1]] / detJ
 
-        # Transform gradients to physical coordinates: dN/dx = invJ^T * dN/dξ
-        dN_phys = dN_ref * invJ'  # 4x2: [∂N/∂x, ∂N/∂y]
+        # Compute inverse Jacobian in-place
+        invdetJ = 1.0 / detJ
+        invJ[1, 1] =  J[2, 2] * invdetJ
+        invJ[1, 2] = -J[1, 2] * invdetJ
+        invJ[2, 1] = -J[2, 1] * invdetJ
+        invJ[2, 2] =  J[1, 1] * invdetJ
+
+        # Transform gradients to physical coordinates: dN/dx = dN/dξ * invJ
+        @simd for i = 1:NNodes
+            dN_phys[i, 1] = dN_ref[i, 1] * invJ[1, 1] + dN_ref[i, 2] * invJ[2, 1]
+            dN_phys[i, 2] = dN_ref[i, 1] * invJ[1, 2] + dN_ref[i, 2] * invJ[2, 2]
+        end
 
         # Physical coordinates at quadrature point
-        xq = sum(N[i] * x[i] for i = 1:4)
-        yq = sum(N[i] * y[i] for i = 1:4)
+        xq = N[1] * x[1] + N[2] * x[2] + N[3] * x[3] + N[4] * x[4]
+        yq = N[1] * y[1] + N[2] * y[2] + N[3] * y[3] + N[4] * y[4]
 
         # Evaluate coefficients
         ax_val = ax_func(xq, yq, 0.0)
         ay_val = ay_func(xq, yq, 0.0)
         f_val = f_func(xq, yq, 0.0)
 
-        # Assemble stiffness matrix: Ke += (ax * dN/dx ⊗ dN/dx + ay * dN/dy ⊗ dN/dy) * detJ * w
-        for i = 1:4
-            for j = 1:4
-                Ke[i, j] += (ax_val * dN_phys[i, 1] * dN_phys[j, 1] +
-                            ay_val * dN_phys[i, 2] * dN_phys[j, 2]) * detJ * w
-            end
-        end
+        # Pre-compute common factors
+        detJ_w = detJ * w
+        ax_detJ_w = ax_val * detJ_w
+        ay_detJ_w = ay_val * detJ_w
+        f_detJ_w = f_val * detJ_w
 
-        # Assemble RHS: fe += N * f * detJ * w
-        for i = 1:4
-            fe[i] += N[i] * f_val * detJ * w
+        # Assemble stiffness matrix: Ke += (ax * dN/dx ⊗ dN/dx + ay * dN/dy ⊗ dN/dy) * detJ * w
+        for i = 1:NNodes
+            dNx_i = dN_phys[i, 1]
+            dNy_i = dN_phys[i, 2]
+            fe[i] += N[i] * f_detJ_w
+
+            @simd for j = 1:NNodes
+                Ke[i, j] += (ax_detJ_w * dNx_i * dN_phys[j, 1] +
+                            ay_detJ_w * dNy_i * dN_phys[j, 2])
+            end
         end
     end
 end
@@ -426,14 +437,15 @@ Find position of column j in row i of CSR matrix using binary search
 Assumes col_idx is sorted within each row
 """
 function find_matrix_position(row_ptr::Vector{Int}, col_idx::Vector{Int}, i::Int, j::Int)
-    left = row_ptr[i]
-    right = row_ptr[i + 1] - 1
+    @inbounds left = row_ptr[i]
+    @inbounds right = row_ptr[i + 1] - 1
 
     while left <= right
         mid = (left + right) >> 1
-        if col_idx[mid] == j
+        @inbounds col_mid = col_idx[mid]
+        if col_mid == j
             return mid
-        elseif col_idx[mid] < j
+        elseif col_mid < j
             left = mid + 1
         else
             right = mid - 1
@@ -443,50 +455,14 @@ function find_matrix_position(row_ptr::Vector{Int}, col_idx::Vector{Int}, i::Int
 end
 
 """
-Build lookup table for fast matrix position finding (O(1) instead of O(log n))
-Returns: Vector of Dict{Int, Int} where lookup[i][j] = position in values array
+Assemble global system with thread-parallel coloring
+Returns: mat_values, rhs, color_times, thread_stats
+Templated on element type parameters for compile-time optimization
 """
-function build_lookup_table(n::Int, row_ptr::Vector{Int}, col_idx::Vector{Int})
-    lookup = Vector{Dict{Int, Int}}(undef, n)
-
-    Threads.@threads for i = 1:n
-        lookup[i] = Dict{Int, Int}()
-        for k = row_ptr[i]:row_ptr[i + 1] - 1
-            lookup[i][col_idx[k]] = k
-        end
-    end
-
-    return lookup
-end
-
-"""
-Sort column indices within each row of CSR matrix (enables binary search)
-Modifies col_idx and values in place
-"""
-function sort_csr_rows!(n::Int, row_ptr::Vector{Int}, col_idx::Vector{Int}, values::Vector{Float64})
-    Threads.@threads for i = 1:n
-        start = row_ptr[i]
-        stop = row_ptr[i + 1] - 1
-        if stop > start
-            # Get indices for this row
-            row_range = start:stop
-            # Sort column indices and permute values accordingly
-            perm = sortperm(view(col_idx, row_range))
-            col_idx[row_range] = col_idx[row_range][perm]
-            values[row_range] = values[row_range][perm]
-        end
-    end
-end
-
-"""
-Assemble global system with thread-parallel coloring (with lookup table option)
-Returns: mat_values, rhs, color_times, lookup_time
-"""
-function assemble_system(mesh::Mesh, elem::Q1Element,
+function assemble_system(mesh::Mesh, elem::Q1Element{Dim, NNodes},
                         n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
                         e2e_colors::Vector{Vector{Int}},
-                        ax_func::Function, ay_func::Function, f_func::Function;
-                        use_lookup::Bool=true)
+                        ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
     nnodes = length(mesh.vertex_x)
     nnz = length(n2n_col_idx)
 
@@ -494,15 +470,11 @@ function assemble_system(mesh::Mesh, elem::Q1Element,
     mat_values = zeros(nnz)
     rhs = zeros(nnodes)
 
-    # Build lookup table for fast matrix access (O(1) instead of O(log n))
-    t_lookup = time()
-    lookup = use_lookup ? build_lookup_table(nnodes, n2n_row_ptr, n2n_col_idx) : nothing
-    lookup_time = time() - t_lookup
-
-    # Thread-local element matrices
-    num_threads = Threads.nthreads()
-    Ke_local = [zeros(4, 4) for _ = 1:num_threads]
-    fe_local = [zeros(4) for _ = 1:num_threads]
+    # Thread-local element matrices (using type parameters for compile-time sizes)
+    max_tid = Threads.maxthreadid()
+    Ke_local = [zeros(NNodes, NNodes) for _ = 1:max_tid]
+    fe_local = [zeros(NNodes) for _ = 1:max_tid]
+    workspace_local = [ElementWorkspace{Float64, Dim, NNodes}() for _ = 1:max_tid]
 
     # Track time per color
     color_times = zeros(length(e2e_colors))
@@ -514,148 +486,40 @@ function assemble_system(mesh::Mesh, elem::Q1Element,
         # All elements in this color can be assembled in parallel (no conflicts)
         Threads.@threads for iel in elements
             tid = Threads.threadid()
-            Ke = Ke_local[tid]
-            fe = fe_local[tid]
+            @inbounds Ke = Ke_local[tid]
+            @inbounds fe = fe_local[tid]
 
             # Get element nodes
-            nodes = mesh.cell_to_node[iel, :]
-            x = mesh.vertex_x[nodes]
-            y = mesh.vertex_y[nodes]
+            @inbounds nodes = mesh.cell_to_node[iel, :]
+            @inbounds x = mesh.vertex_x[nodes]
+            @inbounds y = mesh.vertex_y[nodes]
 
             # Assemble element
-            assemble_element!(Ke, fe, elem, x, y, ax_func, ay_func, f_func)
+            @inbounds workspace = workspace_local[tid]
+            assemble_element!(Ke, fe, elem, workspace, x, y, ax_func, ay_func, f_func)
 
+            # Scatter to global arrays
             # Scatter to global arrays (no race condition within same color)
-            for i = 1:4
-                gi = nodes[i]
-                rhs[gi] += fe[i]
+            for i = 1:NNodes
+                @inbounds gi = nodes[i]
+                @inbounds rhs[gi] += fe[i]
+            end
 
-                for j = 1:4
-                    gj = nodes[j]
-                    if use_lookup
-                        k = get(lookup[gi], gj, -1)
-                    else
-                        k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
-                    end
-                    if k > 0
-                        mat_values[k] += Ke[i, j]
-                    end
+            for i = 1:NNodes
+                @inbounds gi = nodes[i]
+                for j = 1:NNodes
+                    @inbounds gj = nodes[j]
+                    k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
+                    @inbounds mat_values[k] += Ke[i, j]
                 end
             end
+
         end
 
-        color_times[ic] = time() - t_color
+        @inbounds color_times[ic] = time() - t_color
     end
 
-    return mat_values, rhs, color_times, lookup_time
-end
-
-"""
-Partition elements into chunks for coarse-grained task spawning
-"""
-function partition_elements(elements::Vector{Int}, nchunks::Int)
-    n = length(elements)
-    if n <= nchunks
-        # If fewer elements than chunks, each element gets its own chunk
-        return [[e] for e in elements]
-    end
-
-    chunk_size = div(n + nchunks - 1, nchunks)  # Ceiling division
-    chunks = Vector{Int}[]
-
-    for i in 1:chunk_size:n
-        push!(chunks, elements[i:min(i+chunk_size-1, n)])
-    end
-
-    return chunks
-end
-
-"""
-Assemble global system using @spawn with chunked tasks (Krysl's approach)
-Returns: mat_values, rhs, color_times, lookup_time
-"""
-function assemble_system_spawn(mesh::Mesh, elem::Q1Element,
-                               n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
-                               e2e_colors::Vector{Vector{Int}},
-                               ax_func::Function, ay_func::Function, f_func::Function;
-                               use_lookup::Bool=true,
-                               nchunks_per_color::Int=0)
-    nnodes = length(mesh.vertex_x)
-    nnz = length(n2n_col_idx)
-
-    # Initialize global arrays
-    mat_values = zeros(nnz)
-    rhs = zeros(nnodes)
-
-    # Build lookup table for fast matrix access (O(1) instead of O(log n))
-    t_lookup = time()
-    lookup = use_lookup ? build_lookup_table(nnodes, n2n_row_ptr, n2n_col_idx) : nothing
-    lookup_time = time() - t_lookup
-
-    # Thread-local element matrices
-    num_threads = Threads.nthreads()
-    Ke_local = [zeros(4, 4) for _ = 1:num_threads]
-    fe_local = [zeros(4) for _ = 1:num_threads]
-
-    # Determine number of chunks per color
-    if nchunks_per_color == 0
-        nchunks_per_color = num_threads * 2  # 2x oversubscription for load balancing
-    end
-
-    # Track time per color
-    color_times = zeros(length(e2e_colors))
-
-    # Loop over colors (sequential - ensures no race conditions)
-    for (ic, elements) in enumerate(e2e_colors)
-        t_color = time()
-
-        # Partition elements into chunks
-        chunks = partition_elements(elements, nchunks_per_color)
-
-        # Spawn tasks for each chunk (Krysl's pattern)
-        Threads.@sync begin
-            for chunk in chunks
-                Threads.@spawn begin
-                    tid = Threads.threadid()
-                    Ke = Ke_local[tid]
-                    fe = fe_local[tid]
-
-                    # Process all elements in this chunk
-                    for iel in chunk
-                        # Get element nodes
-                        nodes = mesh.cell_to_node[iel, :]
-                        x = mesh.vertex_x[nodes]
-                        y = mesh.vertex_y[nodes]
-
-                        # Assemble element
-                        assemble_element!(Ke, fe, elem, x, y, ax_func, ay_func, f_func)
-
-                        # Scatter to global arrays (no race condition within same color)
-                        for i = 1:4
-                            gi = nodes[i]
-                            rhs[gi] += fe[i]
-
-                            for j = 1:4
-                                gj = nodes[j]
-                                if use_lookup
-                                    k = get(lookup[gi], gj, -1)
-                                else
-                                    k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
-                                end
-                                if k > 0
-                                    mat_values[k] += Ke[i, j]
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        color_times[ic] = time() - t_color
-    end
-
-    return mat_values, rhs, color_times, lookup_time
+    return mat_values, rhs, color_times
 end
 
 # ============================================================================
@@ -692,9 +556,8 @@ function apply_boundary_conditions(n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector
 
     reduced_row_ptr[1] = 1
     for i = 1:nfree
-        gi = free_to_global[i]
-        reduced_rhs[i] = rhs[gi]
-
+        @inbounds gi = free_to_global[i]
+        @inbounds reduced_rhs[i] = rhs[gi]
         for k = n2n_row_ptr[gi]:n2n_row_ptr[gi + 1] - 1
             gj = n2n_col_idx[k]
             if global_to_free[gj] != -1
@@ -702,7 +565,7 @@ function apply_boundary_conditions(n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector
                 push!(reduced_values, mat_values[k])
             end
         end
-        reduced_row_ptr[i + 1] = length(reduced_col_idx) + 1
+        @inbounds reduced_row_ptr[i + 1] = length(reduced_col_idx) + 1
     end
 
     return reduced_row_ptr, reduced_col_idx, reduced_values, reduced_rhs, free_to_global
@@ -725,6 +588,43 @@ function write_solution(filename::String, mesh::Mesh, solution::Vector{Float64})
 end
 
 # ============================================================================
+# Precompilation Workload
+# ============================================================================
+
+@compile_workload begin
+    # Small warm-up problem to precompile hot functions
+    # This eliminates JIT overhead from first assembly iteration
+
+    # Generate tiny mesh (4x4 elements)
+    mesh_warm = generate_mesh(4, 4)
+    elem_warm = Q1Element()
+
+    # Build connectivity
+    n2n_row_ptr_warm, n2n_col_idx_warm, e2e_colors_warm = build_mesh_connectivity(mesh_warm)
+
+    # Simple coefficient functions
+    ax_warm(x, y, z) = 1.0
+    ay_warm(x, y, z) = 1.0
+    f_warm(x, y, z) = 1.0
+
+    # Run assembly (this precompiles all kernels)
+    mat_values_warm, rhs_warm, _ = assemble_system(
+        mesh_warm, elem_warm,
+        n2n_row_ptr_warm, n2n_col_idx_warm, e2e_colors_warm,
+        ax_warm, ay_warm, f_warm
+    )
+
+    # Precompile boundary conditions
+    reduced_row_ptr_warm, reduced_col_idx_warm, reduced_values_warm, reduced_rhs_warm, free_to_global_warm =
+        apply_boundary_conditions(n2n_row_ptr_warm, n2n_col_idx_warm, mat_values_warm, rhs_warm, mesh_warm.boundary_nodes)
+
+    # Precompile sparse solve
+    K_warm = SparseMatrixCSC(length(free_to_global_warm), length(free_to_global_warm),
+                              reduced_row_ptr_warm, reduced_col_idx_warm, reduced_values_warm)
+    sol_warm = K_warm \ reduced_rhs_warm
+end
+
+# ============================================================================
 # Main Program
 # ============================================================================
 
@@ -743,11 +643,10 @@ function main()
     # ========================================================================
 
     # Material coefficients and forcing term (varying coefficients)
-    ax(x, y, z) = 1.0 + 0.5 * sin(2π * x) * cos(2π * y)
-    ay(x, y, z) = 1.0 + 0.5 * cos(2π * x) * sin(2π * y)
+    ax(x, y, z) = 1.0
+    ay(x, y, z) = 1.0
     function f(x, y, z)
         # Manufactured solution: u = sin(π*x) * sin(π*y)
-        # With varying coefficients, exact RHS is more complex, but we use this for testing
         return 2.0 * π^2 * sin(π * x) * sin(π * y)
     end
 
@@ -755,7 +654,7 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 512, 512
+    nx, ny = 256, 256
     println("Generating mesh: $nx x $ny Q1 elements")
 
     t0 = time()
@@ -770,6 +669,14 @@ function main()
     # ========================================================================
     # Build connectivity and coloring
     # ========================================================================
+
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running connectivity JIT warm-up...")
+    t_warmup = time()
+    _, _, _ = build_mesh_connectivity(mesh)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
 
     println("Building mesh connectivity...")
     t0 = time()
@@ -787,7 +694,7 @@ function main()
     println()
 
     # ========================================================================
-    # Assembly
+    # Assembly (with JIT warm-up)
     # ========================================================================
 
     println("="^70)
@@ -796,15 +703,23 @@ function main()
 
     elem = Q1Element()
 
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running JIT warm-up...")
+    t_warmup = time()
+    _ = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors, ax, ay, f)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
+
+    # Actual timed run (using binary search for matrix position finding)
+    println("Using binary search for matrix position finding")
     t0 = time()
-    mat_values, rhs, color_times, lookup_time = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors,
-                                                                 ax, ay, f)
+    mat_values, rhs, color_times = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors,
+                                                                  ax, ay, f)
     assembly_time = time() - t0
 
     println("Assembly complete")
     println("  Total assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
-    println("  Lookup table build:  ", @sprintf("%.2f ms", lookup_time * 1000))
-    println("  Element assembly:    ", @sprintf("%.2f ms", (assembly_time - lookup_time) * 1000))
     println()
     println("  Time per color:")
     for ic = 1:length(e2e_colors)

@@ -40,10 +40,10 @@ main(int argc, char* argv[])
     std::cout << " ## THREADS " << Kokkos::num_threads() << "\n";
     //
     IMSI::DomainParams dParams;
-    dParams.numElePerDir[0] = 32;  // Coarse mesh: 32x32 elements
-    dParams.numElePerDir[1] = 32;  // Fine mesh: 1024x1024 (ratio=32)
+    dParams.numElePerDir[0] = 8;  // Coarse mesh: 8x8 elements
+    dParams.numElePerDir[1] = 8;  // Fine mesh: 1024x1024 (ratio=32)
     dParams.omega           = IMSI::DomainType::Rectangle;
-    dParams.cellType        = IMSI::ElementType::MFEM_L;
+    dParams.cellType        = IMSI::ElementType::Q1;
     //
     std::cout << " Grid = " << dParams.numElePerDir[0] << " x " << dParams.numElePerDir[1] << "\n";
     if (dParams.cellType == IMSI::ElementType::MFEM_L) {
