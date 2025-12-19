@@ -42,10 +42,8 @@ function assemble_system(mesh::Mesh, elem::Q1Element{Dim, NNodes},
     mat_values = zeros(nnz)
     rhs = zeros(nnodes)
 
-    # Thread-local element matrices (using type parameters for compile-time sizes)
+    # Thread-local workspaces (Ke and fe are now in workspace)
     max_tid = Threads.maxthreadid()
-    Ke_local = [zeros(NNodes, NNodes) for _ = 1:max_tid]
-    fe_local = [zeros(NNodes) for _ = 1:max_tid]
     workspace_local = [ElementWorkspace{Float64, Dim, NNodes}() for _ = 1:max_tid]
 
     # Track time per color
@@ -58,31 +56,39 @@ function assemble_system(mesh::Mesh, elem::Q1Element{Dim, NNodes},
         # All elements in this color can be assembled in parallel (no conflicts)
         Threads.@threads for iel in elements
             tid = Threads.threadid()
-            @inbounds Ke = Ke_local[tid]
-            @inbounds fe = fe_local[tid]
-
-            # Get element nodes
-            @inbounds nodes = mesh.cell_to_node[iel, :]
-            @inbounds x = mesh.vertex_x[nodes]
-            @inbounds y = mesh.vertex_y[nodes]
-
-            # Assemble element
             @inbounds workspace = workspace_local[tid]
-            assemble_element!(Ke, fe, elem, workspace, x, y, ax_func, ay_func, f_func)
 
-            # Scatter to global arrays
-            # Scatter to global arrays (no race condition within same color)
-            for i = 1:NNodes
-                @inbounds gi = nodes[i]
-                @inbounds rhs[gi] += fe[i]
+            # Use pre-allocated arrays from workspace (avoid allocation!)
+            nodes = workspace.nodes
+            x = workspace.x_coords
+            y = workspace.y_coords
+
+            # Extract element data (manual copy, no allocation)
+            @inbounds for i = 1:NNodes
+                nodes[i] = mesh.cell_to_node[iel, i]
+            end
+            @inbounds for i = 1:NNodes
+                ni = nodes[i]
+                x[i] = mesh.vertex_x[ni]
+                y[i] = mesh.vertex_y[ni]
             end
 
-            for i = 1:NNodes
-                @inbounds gi = nodes[i]
+            # Assemble element (Ke and fe are in workspace)
+            assemble_element!(elem, workspace, x, y, ax_func, ay_func, f_func)
+
+            # Extract Ke and fe from workspace for scattering
+            Ke = workspace.Ke
+            fe = workspace.fe
+
+            # Combined scatter loop (better cache locality)
+            @inbounds for i = 1:NNodes
+                gi = nodes[i]
+                rhs[gi] += fe[i]
+
                 for j = 1:NNodes
-                    @inbounds gj = nodes[j]
+                    gj = nodes[j]
                     k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
-                    @inbounds mat_values[k] += Ke[i, j]
+                    mat_values[k] += Ke[i, j]
                 end
             end
 
@@ -122,12 +128,13 @@ end
     )
 
     # Precompile boundary conditions
-    reduced_row_ptr_warm, reduced_col_idx_warm, reduced_values_warm, reduced_rhs_warm, free_to_global_warm =
+    # Note: apply_boundary_conditions returns CSR-style arrays, reinterpreted as CSC (works due to symmetry)
+    reduced_colptr_warm, reduced_row_idx_warm, reduced_nzval_warm, reduced_rhs_warm, free_to_global_warm =
         apply_boundary_conditions(n2n_row_ptr_warm, n2n_col_idx_warm, mat_values_warm, rhs_warm, mesh_warm.boundary_nodes)
 
     # Precompile sparse solve
     K_warm = SparseMatrixCSC(length(free_to_global_warm), length(free_to_global_warm),
-                              reduced_row_ptr_warm, reduced_col_idx_warm, reduced_values_warm)
+                              reduced_colptr_warm, reduced_row_idx_warm, reduced_nzval_warm)
     sol_warm = K_warm \ reduced_rhs_warm
 end
 
@@ -161,7 +168,7 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 256, 256
+    nx, ny = 32, 32
     println("Generating mesh: $nx x $ny Q1 elements")
 
     t0 = time()
@@ -241,7 +248,10 @@ function main()
 
     println("Applying boundary conditions...")
     t0 = time()
-    reduced_row_ptr, reduced_col_idx, reduced_values, reduced_rhs, free_to_global =
+    # Note: apply_boundary_conditions returns CSR-style arrays (row_ptr, col_idx, values)
+    # but we reinterpret them as CSC when creating SparseMatrixCSC.
+    # This works because the global stiffness matrix K is symmetric.
+    reduced_colptr, reduced_row_idx, reduced_nzval, reduced_rhs, free_to_global =
         apply_boundary_conditions(n2n_row_ptr, n2n_col_idx, mat_values, rhs, mesh.boundary_nodes)
     bc_time = time() - t0
 
@@ -249,7 +259,7 @@ function main()
     println("  Total DOFs:    ", length(mesh.vertex_x))
     println("  Boundary DOFs: ", length(mesh.boundary_nodes))
     println("  Free DOFs:     ", nfree)
-    println("  Reduced nnz:   ", length(reduced_col_idx))
+    println("  Reduced nnz:   ", length(reduced_row_idx))
     println("  BC time:       ", @sprintf("%.2f ms", bc_time * 1000))
     println()
 
@@ -259,8 +269,8 @@ function main()
 
     println("Solving linear system...")
 
-    # Build sparse matrix
-    K = SparseMatrixCSC(nfree, nfree, reduced_row_ptr, reduced_col_idx, reduced_values)
+    # Build sparse matrix (CSC format for Julia's default sparse matrix type)
+    K = SparseMatrixCSC(nfree, nfree, reduced_colptr, reduced_row_idx, reduced_nzval)
 
     t0 = time()
     sol_free = K \ reduced_rhs

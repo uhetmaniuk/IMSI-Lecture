@@ -26,137 +26,120 @@ BLAS.set_num_threads(1)
 include("FEMBase.jl")
 using .FEMBase
 
+# Load PCG solver
+include("PCG.jl")
+using .PCG
+
 # ============================================================================
 # MFEM-Specific Functions
 # ============================================================================
 
 """
-Build CSR sparsity pattern for structured fine grid
-ratio: refinement ratio (fine grid is (ratio+1) x (ratio+1) nodes)
+Workspace for MFEM element assembly (reused across elements to avoid allocations)
 """
-function build_fine_grid_sparsity(ratio::Int)
-    numNodes = (ratio + 1) * (ratio + 1)
+struct MFEWorkspace{T<:AbstractFloat, Dim, NNodes}
+    # DOF mapping arrays
+    globalToFree::Vector{Int}
+    freeToGlobal::Vector{Int}
+    globalToBoundary::Vector{Int}
+    boundaryToGlobal::Vector{Int}
 
-    matRowPtr = zeros(Int, numNodes + 1)
-    matColIdx = Int[]
+    # K_ii (interior-interior) sparse matrix arrays
+    colptr_ii::Vector{Int}
+    rowidx_ii::Vector{Int}
+    nzval_ii::Vector{T}
 
-    for iy = 0:ratio
-        for ix = 0:ratio
-            nodeID = ix + iy * (ratio + 1) + 1  # 1-based indexing
+    # K_b (boundary-all) sparse matrix arrays
+    matRowPtr_b::Vector{Int}
+    matColIdx_b::Vector{Int}
+    matValues_b::Vector{T}
 
-            # Add neighbors in 9-point stencil
-            if iy > 0
-                if ix > 0
-                    push!(matColIdx, nodeID - 1 - (ratio + 1))
-                end
-                push!(matColIdx, nodeID - (ratio + 1))
-                if ix < ratio
-                    push!(matColIdx, nodeID + 1 - (ratio + 1))
-                end
-            end
-            if ix > 0
-                push!(matColIdx, nodeID - 1)
-            end
-            push!(matColIdx, nodeID)
-            if ix < ratio
-                push!(matColIdx, nodeID + 1)
-            end
-            if iy < ratio
-                if ix > 0
-                    push!(matColIdx, nodeID - 1 + (ratio + 1))
-                end
-                push!(matColIdx, nodeID + (ratio + 1))
-                if ix < ratio
-                    push!(matColIdx, nodeID + 1 + (ratio + 1))
-                end
-            end
+    # RHS and basis function arrays
+    rhs_fine::Vector{T}
+    btmp::Matrix{T}
+    phi::Matrix{T}
+    utmp_init::Matrix{T}
+    utmp::Matrix{T}
 
-            matRowPtr[nodeID + 1] = length(matColIdx)
-        end
-    end
+    # Coarse element matrices (output of compute_mfem_element!)
+    Ke_coarse::Matrix{T}
+    fe_coarse::Vector{T}
 
-    # Convert to 1-based CSR
-    matRowPtr[1] = 1
-    for i = 2:numNodes+1
-        matRowPtr[i] += 1
-    end
+    # Coarse element data (separate from fine element workspace to avoid conflicts)
+    nodes_coarse::Vector{Int}
+    x_coarse::Vector{T}
+    y_coarse::Vector{T}
 
-    return matRowPtr, matColIdx
+    # PCG solver workspace (pre-allocated for in-place solving)
+    pcg_workspace::PCG.PCGWorkspace{T}
+
+    # Fine element assembly workspace (contains Ke, fe, x_coords, y_coords, nodes)
+    element::ElementWorkspace{T, Dim, NNodes}
 end
 
 """
-Assemble fine grid matrix and RHS for a single coarse element
-Uses optimized assemble_element! from FEMBase with workspace
+Constructor for MFEWorkspace - pre-allocates all arrays based on ratio
 """
-function assemble_fine_grid!(matValues::Vector{Float64}, rhs::Vector{Float64},
-                            matRowPtr::Vector{Int}, matColIdx::Vector{Int},
-                            elem::Q1Element{Dim, NNodes}, workspace::ElementWorkspace{Float64, Dim, NNodes},
-                            ratio::Int,
-                            x_corner::Vector{Float64}, y_corner::Vector{Float64},
-                            ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
-    fill!(matValues, 0.0)
-    fill!(rhs, 0.0)
+function MFEWorkspace{T, Dim, NNodes}(ratio::Int) where {T<:AbstractFloat, Dim, NNodes}
+    numNodes = (ratio + 1) * (ratio + 1)
+    numVectors = 4
+    numVectorsToSolve = 3
+    nfree = numNodes - 4 * ratio
+    nboundary = 4 * ratio
 
-    # Compute fine grid spacing
-    hx = (x_corner[2] - x_corner[1]) / ratio
-    hy = (y_corner[4] - y_corner[1]) / ratio
+    # Pre-allocate with maximum possible sizes (9-point stencil)
+    max_nnz_ii = 9 * nfree
+    max_nnz_b = 9 * nboundary
 
-    # Assemble each fine element (reuse matrices across iterations)
-    Ke_fine = zeros(4, 4)
-    fe_fine = zeros(4)
+    return MFEWorkspace{T, Dim, NNodes}(
+        # DOF mappings
+        fill(-1, numNodes),           # globalToFree
+        zeros(Int, nfree),            # freeToGlobal
+        fill(-1, numNodes),           # globalToBoundary
+        zeros(Int, nboundary),        # boundaryToGlobal
 
-    for iy = 0:ratio-1
-        for ix = 0:ratio-1
-            # Fine element corners
-            x_fine = zeros(4)
-            y_fine = zeros(4)
-            x_fine[1] = x_corner[1] + ix * hx
-            y_fine[1] = y_corner[1] + iy * hy
-            x_fine[2] = x_fine[1] + hx
-            y_fine[2] = y_fine[1]
-            x_fine[3] = x_fine[2]
-            y_fine[3] = y_fine[2] + hy
-            x_fine[4] = x_fine[1]
-            y_fine[4] = y_fine[3]
+        # K_ii arrays
+        zeros(Int, nfree + 1),        # colptr_ii
+        zeros(Int, max_nnz_ii),       # rowidx_ii
+        zeros(T, max_nnz_ii),         # nzval_ii
 
-            # Assemble fine element using optimized kernel from FEMBase
-            assemble_element!(Ke_fine, fe_fine, elem, workspace, x_fine, y_fine, ax_func, ay_func, f_func)
+        # K_b arrays
+        zeros(Int, nboundary + 1),    # matRowPtr_b
+        zeros(Int, max_nnz_b),        # matColIdx_b
+        zeros(T, max_nnz_b),          # matValues_b
 
-            # Fine element node list (1-based)
-            nodeList = [
-                ix + iy * (ratio + 1) + 1,
-                ix + 1 + iy * (ratio + 1) + 1,
-                ix + 1 + (iy + 1) * (ratio + 1) + 1,
-                ix + (iy + 1) * (ratio + 1) + 1
-            ]
+        # RHS and basis functions
+        zeros(T, numNodes),           # rhs_fine
+        zeros(T, nfree, numVectorsToSolve),  # btmp
+        zeros(T, numNodes, numVectors),      # phi
+        zeros(T, nfree, numVectorsToSolve),  # utmp_init
+        zeros(T, nfree, numVectorsToSolve),  # utmp
 
-            # Scatter to global fine grid arrays
-            for i = 1:4
-                gi = nodeList[i]
-                rhs[gi] += fe_fine[i]
+        # Coarse element matrices
+        zeros(T, 4, 4),               # Ke_coarse
+        zeros(T, 4),                  # fe_coarse
 
-                for j = 1:4
-                    gj = nodeList[j]
-                    # Find position in sparse matrix
-                    for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
-                        if matColIdx[k] == gj
-                            matValues[k] += Ke_fine[i, j]
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
+        # Coarse element data
+        zeros(Int, 4),                # nodes_coarse
+        zeros(T, 4),                  # x_coarse
+        zeros(T, 4),                  # y_coarse
+
+        # PCG solver workspace (pre-allocated for nfree interior DOFs)
+        PCG.PCGWorkspace{T}(nfree),
+
+        # Fine element workspace (contains Ke, fe, x_coords, y_coords, nodes)
+        ElementWorkspace{T, Dim, NNodes}()
+    )
 end
 
 """
 Compute MFEM basis functions and coarse element matrices
 Returns: phi (basis functions on fine grid)
-Uses optimized assembly with workspace
+Uses optimized assembly with sparse K_ii (interior-interior) and K_b (boundary-all) matrices
+Follows the C++ implementation in src/ScaledLaplacian.h (MFEMAssemblyFunctor::operator())
 """
 function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Float64},
-                              elem::Q1Element{Dim, NNodes}, workspace::ElementWorkspace{Float64, Dim, NNodes},
+                              elem::Q1Element{Dim, NNodes}, workspace::MFEWorkspace{Float64, Dim, NNodes},
                               ratio::Int,
                               x_corner::Vector{Float64}, y_corner::Vector{Float64},
                               ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
@@ -164,171 +147,445 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
     numVectors = 4  # Number of coarse basis functions
     numVectorsToSolve = 3  # Solve only 3, get 4th from partition of unity
 
-    # Build fine grid sparsity pattern
-    matRowPtr, matColIdx = build_fine_grid_sparsity(ratio)
-    nnz = length(matColIdx)
-    matValues = zeros(nnz)
-    rhs_fine = zeros(numNodes)
+    # Use pre-allocated DOF mapping arrays from workspace
+    globalToFree = workspace.globalToFree
+    freeToGlobal = workspace.freeToGlobal
+    globalToBoundary = workspace.globalToBoundary
+    boundaryToGlobal = workspace.boundaryToGlobal
 
-    # Assemble fine grid matrix and RHS using optimized kernel
-    assemble_fine_grid!(matValues, rhs_fine, matRowPtr, matColIdx, elem, workspace, ratio,
-                       x_corner, y_corner, ax_func, ay_func, f_func)
+    # Reset DOF mappings
+    fill!(globalToFree, -1)
+    fill!(globalToBoundary, -1)
 
-    # Build DOF mapping (interior = free, boundary = fixed)
-    globalToFree = fill(-1, numNodes)
-    freeToGlobal = Int[]
-
+    nfree = 0;
+    nboundary = 0;
     for iy = 0:ratio
         for ix = 0:ratio
-            # Skip boundary nodes
-            if ix == 0 || ix == ratio || iy == 0 || iy == ratio
-                continue
-            end
             nodeID = ix + iy * (ratio + 1) + 1
-            push!(freeToGlobal, nodeID)
-            globalToFree[nodeID] = length(freeToGlobal)
-        end
-    end
-
-    nfree = length(freeToGlobal)
-
-    # Initialize basis functions
-    phi = zeros(numNodes, numVectors)
-
-    # Set boundary conditions for first 3 basis functions (Q1 interpolation)
-    for iy = 0:ratio
-        eta = Float64(iy) / ratio
-
-        # Left edge (x=0)
-        ix = 0
-        nodeID = ix + iy * (ratio + 1) + 1
-        phi[nodeID, 1] = 1.0 - eta  # Basis 1: bottom-left corner
-        phi[nodeID, 4] = eta        # Basis 4: top-left corner
-
-        # Right edge (x=1)
-        ix = ratio
-        nodeID = ix + iy * (ratio + 1) + 1
-        phi[nodeID, 2] = 1.0 - eta  # Basis 2: bottom-right corner
-        phi[nodeID, 3] = eta        # Basis 3: top-right corner
-    end
-
-    for ix = 0:ratio
-        xi = Float64(ix) / ratio
-
-        # Bottom edge (y=0)
-        iy = 0
-        nodeID = ix + iy * (ratio + 1) + 1
-        phi[nodeID, 1] = 1.0 - xi  # Basis 1: bottom-left corner
-        phi[nodeID, 2] = xi        # Basis 2: bottom-right corner
-
-        # Top edge (y=1)
-        iy = ratio
-        nodeID = ix + iy * (ratio + 1) + 1
-        phi[nodeID, 3] = xi        # Basis 3: top-right corner
-        phi[nodeID, 4] = 1.0 - xi  # Basis 4: top-left corner
-    end
-
-    # Build reduced system (free DOFs only)
-    reduced_row_ptr = zeros(Int, nfree + 1)
-    reduced_row_ptr[1] = 1
-
-    for i = 1:nfree
-        gi = freeToGlobal[i]
-        count = 0
-        for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
-            gj = matColIdx[k]
-            if globalToFree[gj] != -1
-                count += 1
-            end
-        end
-        reduced_row_ptr[i + 1] = reduced_row_ptr[i] + count
-    end
-
-    reduced_nnz = reduced_row_ptr[nfree + 1] - 1
-    reduced_col_idx = zeros(Int, reduced_nnz)
-    reduced_values = zeros(reduced_nnz)
-
-    pos = 1
-    for i = 1:nfree
-        gi = freeToGlobal[i]
-        for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
-            gj = matColIdx[k]
-            if globalToFree[gj] != -1
-                reduced_col_idx[pos] = globalToFree[gj]
-                reduced_values[pos] = matValues[k]
-                pos += 1
+            # Interior nodes
+            if ix > 0 && ix < ratio && iy > 0 && iy < ratio
+                nfree = nfree + 1
+                @inbounds freeToGlobal[nfree] = nodeID
+                @inbounds globalToFree[nodeID] = nfree;
+            else
+                # Boundary nodes
+                nboundary = nboundary + 1;
+                @inbounds boundaryToGlobal[nboundary] = nodeID
+                @inbounds globalToBoundary[nodeID] = nboundary
             end
         end
     end
 
-    # Build RHS for basis function solves
-    btmp = zeros(nfree, numVectorsToSolve)
+    # Use pre-allocated K_ii arrays from workspace
+    colptr_ii = workspace.colptr_ii
+    rowidx_ii = workspace.rowidx_ii
+    nzval_ii = workspace.nzval_ii
+
+    # Reset K_ii arrays
+    fill!(nzval_ii, 0.0)
+
+    # Build K_ii sparsity pattern (interior-interior coupling)
+    # Note: We build the sparsity row-wise (CSR-style) but store in CSC format.
+    # Since K_ii is symmetric, building A^T is equivalent to building A.
+    colptr_ii[1] = 1
 
     for i = 1:nfree
-        gi = freeToGlobal[i]
+        @inbounds iGlobal = freeToGlobal[i]
+        ix = (iGlobal - 1) % (ratio + 1)
+        iy = (iGlobal - 1) ÷ (ratio + 1)
+
+        # Count interior neighbors in 9-point stencil
+        count = 1  # Diagonal
+        hasWest = (ix > 1)
+        hasEast = (ix < ratio - 1)
+        hasSouth = (iy > 1)
+        hasNorth = (iy < ratio - 1)
+
+        # South neighbors
+        if hasSouth
+            count += hasWest + 1 + hasEast
+        end
+        # West and East
+        count += hasWest + hasEast
+        # North neighbors
+        if hasNorth
+            count += hasWest + 1 + hasEast
+        end
+
+        @inbounds colptr_ii[i + 1] = colptr_ii[i] + count
+    end
+
+    @inbounds nnz_ii = colptr_ii[nfree + 1] - 1
+
+    # Fill K_ii sparsity (building row-wise, stored as CSC due to symmetry)
+    for i = 1:nfree
+        @inbounds iGlobal = freeToGlobal[i]
+        ix = (iGlobal - 1) % (ratio + 1)
+        iy = (iGlobal - 1) ÷ (ratio + 1)
+        @inbounds offset = colptr_ii[i]
+
+        # Add interior neighbors
+        # South row
+        if iy > 1
+            if ix > 1
+                jGlobal = iGlobal - 1 - (ratio + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+            jGlobal = iGlobal - (ratio + 1)
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+            if ix < ratio - 1
+                jGlobal = iGlobal + 1 - (ratio + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+        end
+        # West
+        if ix > 1
+            jGlobal = iGlobal - 1
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+        end
+        # Diagonal
+        @inbounds rowidx_ii[offset] = i
+        offset += 1
+        # East
+        if ix < ratio - 1
+            jGlobal = iGlobal + 1
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+        end
+        # North row
+        if iy < ratio - 1
+            if ix > 1
+                jGlobal = iGlobal - 1 + (ratio + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+            jGlobal = iGlobal + (ratio + 1)
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+            if ix < ratio - 1
+                jGlobal = iGlobal + 1 + (ratio + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+        end
+    end
+
+    # Use pre-allocated K_b arrays from workspace
+    matRowPtr_b = workspace.matRowPtr_b
+    matColIdx_b = workspace.matColIdx_b
+    matValues_b = workspace.matValues_b
+
+    # Reset K_b arrays
+    fill!(matValues_b, 0.0)
+
+    # Build K_b sparsity pattern (boundary-all coupling)
+    @inbounds matRowPtr_b[1] = 1
+
+    for i = 1:nboundary
+        @inbounds iGlobal = boundaryToGlobal[i]
+        ix = (iGlobal - 1) % (ratio + 1)
+        iy = (iGlobal - 1) ÷ (ratio + 1)
+
+        # Count all neighbors (boundary and interior) in global numbering
+        count = 1  # Diagonal
+        hasWest = (ix > 0)
+        hasEast = (ix < ratio)
+
+        count += hasWest + hasEast
+        if iy > 0
+            count += 1 + hasWest + hasEast
+        end
+        if iy < ratio
+            count += 1 + hasWest + hasEast
+        end
+
+        @inbounds matRowPtr_b[i + 1] = matRowPtr_b[i] + count
+    end
+
+    @inbounds nnz_b = matRowPtr_b[nboundary + 1] - 1
+
+    # Fill K_b column indices (in global node numbering)
+    for i = 1:nboundary
+        @inbounds iGlobal = boundaryToGlobal[i]
+        ix = (iGlobal - 1) % (ratio + 1)
+        iy = (iGlobal - 1) ÷ (ratio + 1)
+        @inbounds offset = matRowPtr_b[i]
+
+        # Add all neighbors
+        # South row
+        if iy > 0
+            if ix > 0
+                @inbounds matColIdx_b[offset] = iGlobal - 1 - (ratio + 1)
+                offset += 1
+            end
+            @inbounds matColIdx_b[offset] = iGlobal - (ratio + 1)
+            offset += 1
+            if ix < ratio
+                @inbounds matColIdx_b[offset] = iGlobal + 1 - (ratio + 1)
+                offset += 1
+            end
+        end
+        # West
+        if ix > 0
+            @inbounds matColIdx_b[offset] = iGlobal - 1
+            offset += 1
+        end
+        # Diagonal
+        @inbounds matColIdx_b[offset] = iGlobal
+        offset += 1
+        # East
+        if ix < ratio
+            @inbounds matColIdx_b[offset] = iGlobal + 1
+            offset += 1
+        end
+        # North row
+        if iy < ratio
+            if ix > 0
+                @inbounds matColIdx_b[offset] = iGlobal - 1 + (ratio + 1)
+                offset += 1
+            end
+            @inbounds matColIdx_b[offset] = iGlobal + (ratio + 1)
+            offset += 1
+            if ix < ratio
+                @inbounds matColIdx_b[offset] = iGlobal + 1 + (ratio + 1)
+                offset += 1
+            end
+        end
+    end
+
+    # Use pre-allocated RHS and basis function arrays from workspace
+    rhs_fine = workspace.rhs_fine
+    btmp = workspace.btmp
+    phi = workspace.phi
+    utmp_init = workspace.utmp_init
+
+    # Reset arrays
+    fill!(rhs_fine, 0.0)
+    fill!(btmp, 0.0)
+
+    # Set corner values
+    @inbounds phi[1, 1] = 1.0                                    # Bottom-left corner -> Basis 0
+    @inbounds phi[ratio + 1, 2] = 1.0                           # Bottom-right corner -> Basis 1
+    @inbounds phi[(ratio + 1) * (ratio + 1), 3] = 1.0           # Top-right corner -> Basis 2
+    @inbounds phi[(ratio + 1) * ratio + 1, 4] = 1.0             # Top-left corner -> Basis 3
+
+    # Set edge values (Q1 interpolation), skip corners
+    for is = 1:ratio-1
+        s = Float64(is) / ratio
+        # Left edge (ix = 0)
+        nodeID = is * (ratio + 1) + 1
+        @inbounds phi[nodeID, 1] = 1.0 - s  # Basis 0
+        @inbounds phi[nodeID, 4] = s        # Basis 3
+        # Right edge (ix = ratio)
+        nodeID = ratio + is * (ratio + 1) + 1
+        @inbounds phi[nodeID, 2] = 1.0 - s  # Basis 1
+        @inbounds phi[nodeID, 3] = s        # Basis 2
+        # Bottom edge (iy = 0)
+        nodeID = is + 1
+        @inbounds phi[nodeID, 1] = 1.0 - s  # Basis 0
+        @inbounds phi[nodeID, 2] = s        # Basis 1
+        # Top edge (iy = ratio)
+        nodeID = is + ratio * (ratio + 1) + 1
+        @inbounds phi[nodeID, 4] = 1.0 - s  # Basis 3
+        @inbounds phi[nodeID, 3] = s        # Basis 2
+    end
+
+    # Assemble fine elements with scatter to K_ii, K_b, and btmp
+    @inbounds hx = (x_corner[2] - x_corner[1]) / ratio
+    @inbounds hy = (y_corner[4] - y_corner[1]) / ratio
+
+    # Use pre-allocated arrays from element workspace (no redundant allocation!)
+    x_fine = workspace.element.x_coords
+    y_fine = workspace.element.y_coords
+    nodeList = workspace.element.nodes
+
+    for iy = 0:ratio-1
+        for ix = 0:ratio-1
+            # Fine element corners
+            @inbounds x_fine[1] = x_corner[1] + ix * hx
+            @inbounds y_fine[1] = y_corner[1] + iy * hy
+            @inbounds x_fine[2] = x_fine[1] + hx
+            @inbounds y_fine[2] = y_fine[1]
+            @inbounds x_fine[3] = x_fine[2]
+            @inbounds y_fine[3] = y_fine[2] + hy
+            @inbounds x_fine[4] = x_fine[1]
+            @inbounds y_fine[4] = y_fine[3]
+
+            # Assemble fine element (Ke and fe are in workspace.element)
+            assemble_element!(elem, workspace.element, x_fine, y_fine, ax_func, ay_func, f_func)
+
+            # Extract Ke and fe from element workspace
+            Ke_fine = workspace.element.Ke
+            fe_fine = workspace.element.fe
+
+            # Fine element node list
+            nodeList[1] = ix + iy * (ratio + 1) + 1
+            nodeList[2] = ix + 1 + iy * (ratio + 1) + 1
+            nodeList[3] = ix + 1 + (iy + 1) * (ratio + 1) + 1
+            nodeList[4] = ix + (iy + 1) * (ratio + 1) + 1
+
+            # Scatter RHS
+            for i = 1:4
+                @inbounds gi = nodeList[i]
+                @inbounds rhs_fine[gi] += fe_fine[i]
+            end
+
+            # Scatter stiffness to K_ii, K_b, and btmp (hoisted branches for performance)
+            for i = 1:4
+                @inbounds iGlobal = nodeList[i]
+                @inbounds iFree = globalToFree[iGlobal]
+
+                if iFree != -1
+                    # Interior row - process all j together
+                    for j = 1:4
+                        @inbounds jGlobal = nodeList[j]
+                        @inbounds jFree = globalToFree[jGlobal]
+                        @inbounds k_val = Ke_fine[i, j]
+
+                        if jFree != -1
+                            # Interior-interior: add to K_ii
+                            k = find_matrix_position(colptr_ii, rowidx_ii, iFree, jFree)
+                            @inbounds nzval_ii[k] += k_val
+                        else
+                            # Interior-boundary: add to btmp (RHS for static condensation)
+                            @simd for ir = 1:numVectorsToSolve
+                                @inbounds phi_val = phi[jGlobal, ir]
+                                @inbounds btmp[iFree, ir] -= k_val * phi_val
+                            end
+                        end
+                    end
+                else
+                    # Boundary row - process all j together
+                    @inbounds iBoundary = globalToBoundary[iGlobal]
+                    for j = 1:4
+                        @inbounds jGlobal = nodeList[j]
+                        @inbounds k_val = Ke_fine[i, j]
+                        k = find_matrix_position(matRowPtr_b, matColIdx_b, iBoundary, jGlobal)
+                        @inbounds matValues_b[k] += k_val
+                    end
+                end
+            end
+        end
+    end
+
+    # Build initial guess for PCG based on Q1 shape functions
+    for i = 1:nfree
+        @inbounds gi = freeToGlobal[i]
+
+        # Compute normalized coordinates (xi, eta) of this fine node within coarse element
+        # Fine nodes are arranged in a (ratio+1) x (ratio+1) grid
+        iy_fine = (gi - 1) ÷ (ratio + 1)
+        ix_fine = (gi - 1) % (ratio + 1)
+        xi = Float64(ix_fine) / ratio   # Normalized coordinate [0, 1]
+        eta = Float64(iy_fine) / ratio  # Normalized coordinate [0, 1]
+
+        # Evaluate Q1 shape functions at this position
+        # Q1 nodes: [1] bottom-left, [2] bottom-right, [3] top-right, [4] top-left
+        N1 = (1.0 - xi) * (1.0 - eta)  # Basis 1 (bottom-left)
+        N2 = xi * (1.0 - eta)          # Basis 2 (bottom-right)
+        N3 = xi * eta                  # Basis 3 (top-right)
+
+        # Initial guess for interior values of first 3 basis functions
+        @inbounds utmp_init[i, 1] = N1
+        @inbounds utmp_init[i, 2] = N2
+        @inbounds utmp_init[i, 3] = N3
+    end
+
+    # Solve for interior basis functions using in-place PCG with SSOR preconditioning
+    # Use only the filled portions of the pre-allocated arrays
+    K_ii = SparseMatrixCSC(nfree, nfree, colptr_ii[1:nfree+1], rowidx_ii[1:nnz_ii], nzval_ii[1:nnz_ii])
+
+    # Copy initial guess to utmp (will be modified in-place)
+    utmp = workspace.utmp
+    @. utmp = utmp_init
+
+    # Solve in-place (ZERO allocations!)
+    pcg_info = pcg_solve_ssor!(utmp, workspace.pcg_workspace, K_ii, btmp,
+                               omega=1.0, num_ssor_sweeps=1,
+                               tol=1e-12, maxiter=1000, verbose=false)
+
+    # Check convergence
+    #if !pcg_info.converged
+    #    @warn "PCG-SSOR did not converge: iterations=$(pcg_info.iterations), residual=$(pcg_info.residual_norm)"
+    #end
+
+    # Reconstruct full basis functions: copy interior solutions and compute 4th basis
+    for i = 1:nfree
+        @inbounds gi = freeToGlobal[i]
+        sum_val = 0.0
         for ir = 1:numVectorsToSolve
-            sum_val = 0.0
-            for k = matRowPtr[gi]:matRowPtr[gi + 1] - 1
-                gj = matColIdx[k]
-                sum_val += matValues[k] * phi[gj, ir]
-            end
-            btmp[i, ir] = -sum_val
+            @inbounds phi[gi, ir] = utmp[i, ir]
+            sum_val += utmp[i, ir]
         end
-    end
-
-    # Solve for interior basis functions
-    K_reduced = SparseMatrixCSC(nfree, nfree, reduced_row_ptr, reduced_col_idx, reduced_values)
-    utmp = K_reduced \ btmp
-
-    # Copy solutions to phi
-    for i = 1:nfree
-        gi = freeToGlobal[i]
-        for ir = 1:numVectorsToSolve
-            phi[gi, ir] = utmp[i, ir]
-        end
-    end
-
-    # Compute 4th basis function using partition of unity
-    for i = 1:numNodes
-        phi[i, 4] = 1.0 - phi[i, 1] - phi[i, 2] - phi[i, 3]
+        # 4th basis function from partition of unity
+        @inbounds phi[gi, 4] = 1.0 - sum_val
     end
 
     # Compute coarse element RHS: fe_coarse[ir] = phi[:,ir]' * rhs_fine
     for ir = 1:numVectors
         sum_val = 0.0
-        for i = 1:numNodes
-            sum_val += phi[i, ir] * rhs_fine[i]
+        @simd for i = 1:numNodes
+            @inbounds sum_val += phi[i, ir] * rhs_fine[i]
         end
-        fe_coarse[ir] = sum_val
+        @inbounds fe_coarse[ir] = sum_val
     end
 
-    # Compute coarse element stiffness: Ke_coarse[ir,jr] = phi[:,ir]' * K_fine * phi[:,jr]
-    Kphi = zeros(numNodes, numVectors)
+    # Compute coarse element stiffness using Schur complement: Ke_coarse = phi^T * K * phi
+    # This is computed efficiently using K_b (boundary rows only):
+    # kele = phi_b^T * K_b * phi
+    # where K_b includes boundary-interior and boundary-boundary coupling
+    fill!(Ke_coarse, 0.0)
 
-    # Matrix-vector products: Kphi = K_fine * phi
-    for ir = 1:numVectors
-        for i = 1:numNodes
-            sum_val = 0.0
-            for k = matRowPtr[i]:matRowPtr[i + 1] - 1
-                j = matColIdx[k]
-                sum_val += matValues[k] * phi[j, ir]
+    for iBoundary = 1:nboundary
+        @inbounds iGlobal = boundaryToGlobal[iBoundary]
+        @inbounds rowBegin = matRowPtr_b[iBoundary]
+        @inbounds rowEnd = matRowPtr_b[iBoundary + 1] - 1
+
+        for k = rowBegin:rowEnd
+            @inbounds jGlobal = matColIdx_b[k]  # K_b uses global node numbering for columns
+            @inbounds k_val = matValues_b[k]
+
+            # Accumulate contribution to Ke_coarse for all basis function pairs
+            # Hoist phi_i * k_val out of jr loop for better performance
+            for ir = 1:numVectors
+                @inbounds phi_i_k = phi[iGlobal, ir] * k_val
+                @simd for jr = 1:numVectors
+                    @inbounds phi_j = phi[jGlobal, jr]
+                    @inbounds Ke_coarse[ir, jr] += phi_i_k * phi_j
+                end
             end
-            Kphi[i, ir] = sum_val
         end
     end
 
-    # Compute Ke_coarse = phi' * Kphi
-    for ir = 1:numVectors
-        for jr = 1:numVectors
-            sum_val = 0.0
-            for i = 1:numNodes
-                sum_val += phi[i, ir] * Kphi[i, jr]
-            end
-            Ke_coarse[ir, jr] = sum_val
-        end
-    end
-
-    return phi  # Return basis functions for fine-scale reconstruction
+    return phi
 end
 
 # ============================================================================
@@ -337,7 +594,7 @@ end
 
 """
 Assemble global system with MFEM elements (thread-parallel with coloring)
-Returns: mat_values, rhs, basis_functions
+Returns: mat_values, rhs, basis_functions, compute_mfem_time
 Uses optimized kernels from FEMBase with thread-local workspaces
 """
 function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::Int,
@@ -356,38 +613,41 @@ function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::I
     numFineNodes = (ratio + 1) * (ratio + 1)
     basis_functions = [zeros(numFineNodes, 4) for _ = 1:nel]
 
-    # Thread-local element matrices and workspaces
+    # Thread-local workspaces (Ke_coarse and fe_coarse are now in workspace)
     max_tid = Threads.maxthreadid()
-    Ke_local = [zeros(4, 4) for _ = 1:max_tid]
-    fe_local = [zeros(4) for _ = 1:max_tid]
-    workspace_local = [ElementWorkspace{Float64, Dim, NNodes}() for _ = 1:max_tid]
+    workspace_local = [MFEWorkspace{Float64, Dim, NNodes}(ratio) for _ = 1:max_tid]
 
     # Loop over colors
     for (ic, elements) in enumerate(e2e_colors)
         # All elements in this color can be assembled in parallel (no conflicts)
         Threads.@threads for iel in elements
             tid = Threads.threadid()
-            @inbounds Ke = Ke_local[tid]
-            @inbounds fe = fe_local[tid]
             @inbounds workspace = workspace_local[tid]
 
-            # Get element nodes
-            @inbounds nodes = mesh.cell_to_node[iel, :]
-            @inbounds x = mesh.vertex_x[nodes]
-            @inbounds y = mesh.vertex_y[nodes]
+            # Use pre-allocated coarse element arrays from workspace (avoid allocation!)
+            nodes = workspace.nodes_coarse
+            x = workspace.x_coarse
+            y = workspace.y_coarse
+            Ke = workspace.Ke_coarse
+            fe = workspace.fe_coarse
+
+            # Extract element data (manual copy, no allocation)
+            @inbounds for i = 1:4
+                nodes[i] = mesh.cell_to_node[iel, i]
+            end
+            @inbounds for i = 1:4
+                ni = nodes[i]
+                x[i] = mesh.vertex_x[ni]
+                y[i] = mesh.vertex_y[ni]
+            end
 
             # Assemble MFEM element and get basis functions using optimized kernel
-            phi = compute_mfem_element!(Ke, fe, elem, workspace, ratio, x, y, ax_func, ay_func, f_func)
-            basis_functions[iel] = phi
+            @inbounds basis_functions[iel] = compute_mfem_element!(Ke, fe, elem, workspace, ratio, x, y, ax_func, ay_func, f_func)
 
             # Scatter to global arrays (no race condition within same color)
             for i = 1:4
                 @inbounds gi = nodes[i]
                 @inbounds rhs[gi] += fe[i]
-            end
-
-            for i = 1:4
-                @inbounds gi = nodes[i]
                 for j = 1:4
                     @inbounds gj = nodes[j]
                     # Use binary search from FEMBase (assumes sorted columns)
@@ -407,9 +667,11 @@ end
 
 """
 Reconstruct fine-scale solution from coarse solution using MFEM basis functions
+Uses graph coloring to avoid race conditions on shared fine nodes
 """
 function reconstruct_fine_solution(mesh::Mesh, coarse_solution::Vector{Float64},
-                                  basis_functions::Vector{Matrix{Float64}}, ratio::Int)
+                                  basis_functions::Vector{Matrix{Float64}},
+                                  e2e_colors::Vector{Vector{Int}}, ratio::Int)
     nel = size(mesh.cell_to_node, 1)
     nx_coarse = Int(sqrt(nel))  # Assuming square mesh
     ny_coarse = nx_coarse
@@ -424,47 +686,59 @@ function reconstruct_fine_solution(mesh::Mesh, coarse_solution::Vector{Float64},
     fine_y = zeros(nfine)
     fine_u = zeros(nfine)
 
-    # Build fine mesh
-    idx = 1
-    for j = 0:ny_fine
+    # Build fine mesh (parallel - independent writes)
+    Threads.@threads for j = 0:ny_fine
         for i = 0:nx_fine
-            fine_x[idx] = Float64(i) / nx_fine
-            fine_y[idx] = Float64(j) / ny_fine
-            idx += 1
+            idx = (i + 1) + j * (nx_fine + 1)
+            @inbounds fine_x[idx] = Float64(i) / nx_fine
+            @inbounds fine_y[idx] = Float64(j) / ny_fine
         end
     end
 
-    # Reconstruct solution element by element
-    for iel = 1:nel
-        # Coarse element indices
-        iel_1d = iel - 1
-        ix_coarse = iel_1d % nx_coarse
-        iy_coarse = iel_1d ÷ nx_coarse
+    # Thread-local temporary arrays (avoid allocations in hot loop)
+    max_tid = Threads.maxthreadid()
+    nodes_local = [zeros(Int, 4) for _ = 1:max_tid]
+    u_local = [zeros(4) for _ = 1:max_tid]
 
-        # Coarse element nodes and solution values
-        nodes = mesh.cell_to_node[iel, :]
-        u_coarse_elem = coarse_solution[nodes]
+    # Reconstruct solution element by element (parallel with coloring to avoid races)
+    for (ic, elements) in enumerate(e2e_colors)
+        Threads.@threads for iel in elements
+            tid = Threads.threadid()
+            nodes = nodes_local[tid]
+            u_coarse_elem = u_local[tid]
 
-        # Basis functions for this element
-        phi = basis_functions[iel]
+            # Coarse element indices
+            iel_1d = iel - 1
+            ix_coarse = iel_1d % nx_coarse
+            iy_coarse = iel_1d ÷ nx_coarse
 
-        # Reconstruct fine solution: u_fine = phi * u_coarse
-        for iy_local = 0:ratio
-            for ix_local = 0:ratio
-                # Fine node global indices
-                ix_fine = ix_coarse * ratio + ix_local
-                iy_fine = iy_coarse * ratio + iy_local
-                fine_node = ix_fine + iy_fine * (nx_fine + 1) + 1
+            # Extract coarse element nodes and solution values (no allocation!)
+            @inbounds for i = 1:4
+                nodes[i] = mesh.cell_to_node[iel, i]
+                u_coarse_elem[i] = coarse_solution[nodes[i]]
+            end
 
-                # Local fine node index
-                local_node = ix_local + iy_local * (ratio + 1) + 1
+            # Basis functions for this element
+            @inbounds phi = basis_functions[iel]
 
-                # Interpolate: u_fine = sum_i phi[local_node, i] * u_coarse[i]
-                u_val = 0.0
-                for i = 1:4
-                    u_val += phi[local_node, i] * u_coarse_elem[i]
+            # Reconstruct fine solution: u_fine = phi * u_coarse
+            for iy_local = 0:ratio
+                for ix_local = 0:ratio
+                    # Fine node global indices
+                    ix_fine = ix_coarse * ratio + ix_local
+                    iy_fine = iy_coarse * ratio + iy_local
+                    fine_node = ix_fine + iy_fine * (nx_fine + 1) + 1
+
+                    # Local fine node index
+                    local_node = ix_local + iy_local * (ratio + 1) + 1
+
+                    # Interpolate: u_fine = sum_i phi[local_node, i] * u_coarse[i]
+                    u_val = 0.0
+                    @simd for i = 1:4
+                        @inbounds u_val += phi[local_node, i] * u_coarse_elem[i]
+                    end
+                    @inbounds fine_u[fine_node] = u_val
                 end
-                fine_u[fine_node] = u_val
             end
         end
     end
@@ -503,7 +777,7 @@ function main()
     # ========================================================================
 
     nx, ny = 16, 16  # Coarse mesh (MFEM)
-    ratio = 8        # Fine grid refinement ratio per coarse element
+    ratio = 32        # Fine grid refinement ratio per coarse element
 
     println("Generating coarse mesh: $nx x $ny Q1 elements")
     println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
@@ -522,6 +796,14 @@ function main()
     # ========================================================================
     # Build connectivity and coloring
     # ========================================================================
+
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running connectivity JIT warm-up...")
+    t_warmup = time()
+    _, _, _ = build_mesh_connectivity(mesh)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
 
     println("Building mesh connectivity...")
     t0 = time()
@@ -548,13 +830,22 @@ function main()
 
     elem = Q1Element()
 
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running JIT warm-up...")
+    t_warmup = time()
+    _, _, _ = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
+                                                            ax, ay, f)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
+
     t0 = time()
     mat_values, rhs, basis_functions = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
                                                             ax, ay, f)
     assembly_time = time() - t0
 
     println("MFEM assembly complete")
-    println("  Assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  Assembly time:         ", @sprintf("%.2f ms", assembly_time * 1000))
     println()
 
     # ========================================================================
@@ -600,11 +891,11 @@ function main()
     # Expand coarse solution to full DOFs (BCs = 0)
     coarse_solution = zeros(length(mesh.vertex_x))
     for i = 1:nfree
-        coarse_solution[free_to_global[i]] = sol_free[i]
+        @inbounds coarse_solution[free_to_global[i]] = sol_free[i]
     end
 
     t0 = time()
-    fine_x, fine_y, fine_u = reconstruct_fine_solution(mesh, coarse_solution, basis_functions, ratio)
+    fine_x, fine_y, fine_u = reconstruct_fine_solution(mesh, coarse_solution, basis_functions, e2e_colors, ratio)
     reconstruct_time = time() - t0
 
     println("  Fine mesh size: ", length(fine_u), " nodes")

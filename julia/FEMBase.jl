@@ -104,6 +104,12 @@ struct ElementWorkspace{T<:AbstractFloat, Dim, NNodes}
     dN_phys::Matrix{T}
     J::Matrix{T}
     invJ::Matrix{T}
+    Ke::Matrix{T}
+    fe::Vector{T}
+    # Pre-allocated arrays for element data extraction
+    nodes::Vector{Int}
+    x_coords::Vector{T}
+    y_coords::Vector{T}
 
     function ElementWorkspace{T, Dim, NNodes}() where {T<:AbstractFloat, Dim, NNodes}
         new{T, Dim, NNodes}(
@@ -111,7 +117,12 @@ struct ElementWorkspace{T<:AbstractFloat, Dim, NNodes}
             zeros(T, NNodes, Dim),
             zeros(T, NNodes, Dim),
             zeros(T, Dim, Dim),
-            zeros(T, Dim, Dim)
+            zeros(T, Dim, Dim),
+            zeros(T, NNodes, NNodes),
+            zeros(T, NNodes),
+            zeros(Int, NNodes),
+            zeros(T, NNodes),
+            zeros(T, NNodes)
         )
     end
 end
@@ -367,20 +378,21 @@ Assemble element stiffness matrix and RHS for scaled Laplacian
 Templated on element type parameters for compile-time optimization
 Uses workspace to avoid allocations
 """
-@inline function assemble_element!(Ke::Matrix{Float64}, fe::Vector{Float64},
-                          elem::Q1Element{Dim, NNodes},
+@inline function assemble_element!(elem::Q1Element{Dim, NNodes},
                           workspace::ElementWorkspace{Float64, Dim, NNodes},
                           x::Vector{Float64}, y::Vector{Float64},
                           ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
-    fill!(Ke, 0.0)
-    fill!(fe, 0.0)
-
     # Use workspace arrays (no allocation!)
+    Ke = workspace.Ke
+    fe = workspace.fe
     N = workspace.N
     dN_ref = workspace.dN_ref
     dN_phys = workspace.dN_phys
     J = workspace.J
     invJ = workspace.invJ
+
+    fill!(Ke, 0.0)
+    fill!(fe, 0.0)
 
     # Loop over quadrature points
     @fastmath @inbounds for (qp, (ξ, η)) in enumerate(elem.qpts)
@@ -428,13 +440,12 @@ Uses workspace to avoid allocations
 
         # Assemble stiffness matrix: Ke += (ax * dN/dx ⊗ dN/dx + ay * dN/dy ⊗ dN/dy) * detJ * w
         for i = 1:NNodes
-            dNx_i = dN_phys[i, 1]
-            dNy_i = dN_phys[i, 2]
             fe[i] += N[i] * f_detJ_w
-
+            alphax_dNx_i = ax_detJ_w * dN_phys[i, 1]
+            alphay_dNy_i = ay_detJ_w * dN_phys[i, 2]
             @simd for j = 1:NNodes
-                Ke[i, j] += (ax_detJ_w * dNx_i * dN_phys[j, 1] +
-                            ay_detJ_w * dNy_i * dN_phys[j, 2])
+                Ke[i, j] += (alphax_dNx_i * dN_phys[j, 1] +
+                            alphay_dNy_i * dN_phys[j, 2])
             end
         end
     end
