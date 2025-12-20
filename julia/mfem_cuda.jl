@@ -1155,10 +1155,16 @@ function main()
     )
 
     # Solve K_ii * d_utmp = d_btmp using CG for each RHS column
+    # Use CgSolver workspace for memory reuse and proper warm-start
     println("Solving CG on GPU (3 RHS columns)...")
     t0 = time()
     total_iters = 0
     all_converged = true
+
+    # Create CG solver workspace once (reused for all RHS columns)
+    b_col = view(d_btmp, :, 1)
+    solver = CgSolver(K_ii_gpu, b_col)
+
     for col = 1:size(d_btmp, 2)
         b_col = view(d_btmp, :, col)
         x0_col = view(d_utmp, :, col)
@@ -1171,11 +1177,12 @@ function main()
                 ", ||b|| = ", @sprintf("%.2e", b_norm),
                 ", relative = ", @sprintf("%.2e", r0_norm / max(b_norm, 1e-16)))
 
-        x_col, stats = cg(K_ii_gpu, b_col, x0_col;
-                          atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
-        copyto!(view(d_utmp, :, col), x_col)
-        total_iters += stats.niter
-        all_converged = all_converged && stats.solved
+        # Use cg! with warm-start: pass x0_col as 4th argument
+        cg!(solver, K_ii_gpu, b_col, x0_col;
+            atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
+        copyto!(view(d_utmp, :, col), solver.x)
+        total_iters += solver.stats.niter
+        all_converged = all_converged && solver.stats.solved
     end
     gpu_cg_time = time() - t0
 
