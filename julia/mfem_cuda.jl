@@ -903,9 +903,9 @@ function main()
         d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, (nfree_w, nfree_w)
     )
     d_btmp_w .= 1.0
-    _, _ = block_cg(
-        K_warmup, d_btmp_w, d_utmp_w;
-        atol=1e-6, rtol=1e-6, itmax=5, verbose=0
+    _, _ = block_gmres(
+        K_warmup, d_btmp_w;
+        X0=d_utmp_w, atol=1e-6, rtol=1e-6, itmax=5, verbose=0
     )
     CUDA.synchronize()
 
@@ -1108,19 +1108,19 @@ function main()
         d_colptr_ii, d_rowidx_ii, d_valK_ii, (n_total, n_total)
     )
 
-    # Solve K_ii * d_utmp = d_btmp using block CG
-    println("Solving block CG on GPU...")
+    # Solve K_ii * d_utmp = d_btmp using block GMRES
+    println("Solving block GMRES on GPU...")
     t0 = time()
-    # d_utmp contains initial guess and will contain solution after solve
-    d_utmp, stats = block_cg(
-        K_ii_gpu, d_btmp, d_utmp;
-        atol=1e-24, rtol=1e-12, itmax=1000, verbose=0
+    # d_utmp contains initial guess (X0)
+    d_utmp, stats = block_gmres(
+        K_ii_gpu, d_btmp;
+        X0=d_utmp, atol=1e-24, rtol=1e-12, itmax=1000, verbose=0
     )
     gpu_cg_time = time() - t0
 
-    println("  Block CG converged: ", stats.solved)
+    println("  Block GMRES converged: ", stats.solved)
     println("  Iterations: ", stats.niter)
-    println("  Residual norm: ", stats.residuals[end])
+    println("  Residual norm: ", length(stats.residuals) > 0 ? stats.residuals[end] : "N/A")
     println("  GPU CG time: ", @sprintf("%.2f ms", gpu_cg_time * 1000))
     println()
 
