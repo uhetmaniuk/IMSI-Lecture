@@ -1004,6 +1004,7 @@ function main()
     end
 
     nb = nx * ny  # Number of blocks
+    numNodes = (ratio + 1) * (ratio + 1)  # Fine nodes per coarse element
 
     d_phiLocal = cu(phi)
     d_phi = repeat(d_phiLocal, nb, 1)
@@ -1067,7 +1068,6 @@ function main()
 
     # Allocate fine-grid RHS for all nodes (interior + boundary)
     # in all coarse elements
-    numNodes = (ratio + 1) * (ratio + 1)
     d_rhs_fine = CUDA.zeros(Float64, nb * numNodes)
 
     # Launch kernel to assemble K_ii, K_b, btmp, and rhs_fine
