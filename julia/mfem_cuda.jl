@@ -886,17 +886,18 @@ function main()
     CUDA.synchronize()
 
     # Warm-up kernel 5: block_cg solver (critical!)
-    # Need a valid sparse matrix structure
-    d_valK_ii_w .= 1.0  # Make diagonal-dominant for CG convergence
+    # Need a valid sparse matrix structure - build on CPU then upload
+    valK_ii_w_cpu = ones(Float64, nfree_w > 0 ? length(workspace_warmup.nzval_ii) : 1)
     for i = 1:nfree_w
         col_start = workspace_warmup.colptr_ii[i]
         col_end = workspace_warmup.colptr_ii[i+1] - 1
         for k = col_start:col_end
             if workspace_warmup.rowidx_ii[k] == i
-                d_valK_ii_w[k] = 10.0  # Diagonal
+                valK_ii_w_cpu[k] = 10.0  # Diagonal - make dominant
             end
         end
     end
+    copyto!(d_valK_ii_w, valK_ii_w_cpu[1:min(length(valK_ii_w_cpu), nb_warmup * nnz_ii_w)])
     K_warmup = CuSparseMatrixCSC(
         d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, (nfree_w, nfree_w)
     )
