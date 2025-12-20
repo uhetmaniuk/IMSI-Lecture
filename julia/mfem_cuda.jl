@@ -254,31 +254,41 @@ function assemble_Kii_kernel!(
                 nodeList = (node1, node2, node3, node4)
 
                 # Scatter to K_ii and K_b
+                # Block offsets for global indexing into block-diagonal matrices
+                block_offset_free = (iel - 1) * nfree
+                block_offset_boundary = (iel - 1) * nboundary
+
                 for i = 1:4
                     iGlobal = get_node(nodeList, i)
-                    iFree = d_globalToFree[iGlobal]
-                    iBoundary = d_globalToBoundary[iGlobal]
+                    iFree_local = d_globalToFree[iGlobal]
+                    iBoundary_local = d_globalToBoundary[iGlobal]
 
                     # Scatter to K_ii (only for interior nodes)
-                    if iFree != -1
+                    if iFree_local != -1
+                        # Global index into block-diagonal K_ii
+                        iFree_global = block_offset_free + iFree_local
+
                         for j = 1:4
                             jGlobal = get_node(nodeList, j)
-                            jFree = d_globalToFree[jGlobal]
+                            jFree_local = d_globalToFree[jGlobal]
                             k_val = get_Ke_val(Ke_fine, i, j)
 
-                            if jFree != -1
+                            if jFree_local != -1
                                 # Interior-interior: add to K_ii
-                                col_start = d_colptr[iFree]
-                                col_end = d_colptr[iFree + 1] - 1
+                                # Use global column index for colptr lookup
+                                col_start = d_colptr[iFree_global]
+                                col_end = d_colptr[iFree_global + 1] - 1
 
-                                # Binary search for jFree in rowidx
+                                # Global row index to search for
+                                jFree_global = block_offset_free + jFree_local
+
+                                # Binary search for global jFree in rowidx
                                 k_pos = binary_search_sparse(
-                                    d_rowidx, jFree, col_start, col_end
+                                    d_rowidx, jFree_global, col_start, col_end
                                 )
                                 if k_pos != -1
-                                    CUDA.@atomic d_valK_ii[
-                                        offset_ii + k_pos
-                                    ] += k_val
+                                    # k_pos is already global, no offset needed
+                                    CUDA.@atomic d_valK_ii[k_pos] += k_val
                                 end
                             else
                                 # Interior-boundary: add to btmp
@@ -290,7 +300,7 @@ function assemble_Kii_kernel!(
                                 phi_val1 = d_phi[offset_nodes + jGlobal, 1]
                                 phi_val2 = d_phi[offset_nodes + jGlobal, 2]
                                 phi_val3 = d_phi[offset_nodes + jGlobal, 3]
-                                btmp_idx = offset_btmp + iFree
+                                btmp_idx = offset_btmp + iFree_local
                                 CUDA.@atomic d_btmp[btmp_idx, 1] -= k_val * phi_val1
                                 CUDA.@atomic d_btmp[btmp_idx, 2] -= k_val * phi_val2
                                 CUDA.@atomic d_btmp[btmp_idx, 3] -= k_val * phi_val3
@@ -299,15 +309,19 @@ function assemble_Kii_kernel!(
                     end
 
                     # Scatter to K_b (only for boundary nodes)
-                    if iBoundary != -1
+                    if iBoundary_local != -1
+                        # Global row index into block-diagonal K_b
+                        iBoundary_global = block_offset_boundary + iBoundary_local
+
                         for j = 1:4
                             jGlobal = get_node(nodeList, j)
                             jGlobal_offset = offset_nodes + jGlobal
                             k_val = get_Ke_val(Ke_fine, i, j)
 
                             # Boundary-all: add to K_b
-                            row_start = d_rowptr_b[iBoundary]
-                            row_end = d_rowptr_b[iBoundary + 1] - 1
+                            # Use global row index for rowptr lookup
+                            row_start = d_rowptr_b[iBoundary_global]
+                            row_end = d_rowptr_b[iBoundary_global + 1] - 1
 
                             # Binary search for jGlobal_offset in colidx
                             k_pos = binary_search_sparse(
@@ -315,9 +329,8 @@ function assemble_Kii_kernel!(
                                 row_start, row_end
                             )
                             if k_pos != -1
-                                CUDA.@atomic d_valK_b[
-                                    offset_b + k_pos
-                                ] += k_val
+                                # k_pos is already global, no offset needed
+                                CUDA.@atomic d_valK_b[k_pos] += k_val
                             end
                         end
                     end
@@ -663,19 +676,26 @@ function compute_fe_Ke_coarse_kernel!(
     # Parallelize over boundary rows: each thread handles some rows
     # Accumulate locally in shared memory to avoid excessive atomics
 
+    # Block offset for global boundary indexing
+    block_offset_boundary = (iel - 1) * nboundary
+
     for iBoundary_local = tid:blockDim().x:nboundary
         if iBoundary_local <= nboundary
-            # Global node index for this boundary node
+            # Global node index for this boundary node (local within element)
             @inbounds iGlobal = d_boundaryToGlobal[iBoundary_local]
 
-            # Row range in K_b for this boundary node
-            @inbounds row_start = d_rowptr_b[iBoundary_local]
-            @inbounds row_end = d_rowptr_b[iBoundary_local + 1] - 1
+            # Global boundary index for rowptr lookup
+            iBoundary_global = block_offset_boundary + iBoundary_local
+
+            # Row range in K_b for this boundary node (using global index)
+            @inbounds row_start = d_rowptr_b[iBoundary_global]
+            @inbounds row_end = d_rowptr_b[iBoundary_global + 1] - 1
 
             # Iterate over non-zeros in this row
             for k_pos = row_start:row_end
-                @inbounds jGlobal_offset = d_colidx_b[offset_b + k_pos]
-                @inbounds k_val = d_valK_b[offset_b + k_pos]
+                # k_pos is already global, no offset needed
+                @inbounds jGlobal_offset = d_colidx_b[k_pos]
+                @inbounds k_val = d_valK_b[k_pos]
 
                 # Convert global offset to local node index
                 jGlobal = jGlobal_offset - offset_nodes
