@@ -1286,15 +1286,18 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
         uTrace[3] = uCoarse_d(ix + (iy + 1) * (numEleX + 1));
 
         // Reconstruct fine nodes for this coarse element using stored phi
+        // Precompute stride to avoid repeated multiplication
+        constexpr int nodeStride = (ratio + 1) * (ratio + 1);
         for (int jy = 0; jy <= ratio; ++jy) {
           for (int jx = 0; jx <= ratio; ++jx) {
-            int    nodeID = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
-            double uVal   = 0.0;
-            for (int k = 0; k < 4; ++k) {
-              int const phiIdx = jx + jy * (ratio + 1) + k * (ratio + 1) * (ratio + 1);
-              uVal += phiMFEM_local(eleID, phiIdx) * uTrace[k];
-            }
-            uFine_d(nodeID) = uVal;
+            int const localNode = jx + jy * (ratio + 1);
+            int const nodeID    = ix * ratio + jx + (iy * ratio + jy) * (numFineEleX + 1);
+            // Load all 4 phi values for this node (cache-friendly: consecutive access per k)
+            double const phi0 = phiMFEM_local(eleID, localNode);
+            double const phi1 = phiMFEM_local(eleID, localNode + nodeStride);
+            double const phi2 = phiMFEM_local(eleID, localNode + 2 * nodeStride);
+            double const phi3 = phiMFEM_local(eleID, localNode + 3 * nodeStride);
+            uFine_d(nodeID) = phi0 * uTrace[0] + phi1 * uTrace[1] + phi2 * uTrace[2] + phi3 * uTrace[3];
           }
         }
       });
@@ -1303,10 +1306,10 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
   // Copy result back to host for file output
   auto uFine_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), uFine_d);
 
-  // Write to file
+  // Write to file (use '\n' instead of std::endl to avoid flushing on each line)
   std::ofstream outFine("outputFine.txt");
   for (int i = 0; i < numFineNodes; ++i) {
-    outFine << uFine_h(i) << std::endl;
+    outFine << uFine_h(i) << '\n';
   }
   outFine.close();
 }

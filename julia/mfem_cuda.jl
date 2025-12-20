@@ -17,6 +17,7 @@
 using CUDA
 using CUDA.CUSPARSE
 using Krylov
+import Krylov: CgSolver, cg!
 using SparseArrays
 using LinearAlgebra
 using Printf
@@ -773,7 +774,7 @@ function main()
     # Mesh generation
     # ====================================================================
 
-    nx, ny = 16, 16  # Coarse mesh (MFEM)
+    nx, ny = 32, 32  # Coarse mesh (MFEM)
     ratio = 32        # Fine grid refinement ratio per coarse element
 
     println("Generating coarse mesh: $nx x $ny MFEM elements")

@@ -463,8 +463,8 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 16, 16  # Coarse mesh (MFEM)
-    ratio = 32        # Fine grid refinement ratio per coarse element
+    nx, ny = 48, 48  # Coarse mesh (MFEM)
+    ratio = 64        # Fine grid refinement ratio per coarse element
 
     println("Generating coarse mesh: $nx x $ny MFEM elements")
     println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
