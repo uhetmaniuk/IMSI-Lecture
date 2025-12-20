@@ -1257,8 +1257,15 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
 
   // Create Kokkos::Views for parallel computation on device
   Kokkos::View<double*, ExecutionSpace> uFine_d("uFine", numFineNodes);
-  Kokkos::View<const double*, ExecutionSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>> uCoarse_d(
-      uCoarse, (numEleX + 1) * (numEleY + 1));
+
+  // Copy uCoarse from host to device (can't use unmanaged view with host pointer on GPU)
+  int const numCoarseNodes = (numEleX + 1) * (numEleY + 1);
+  Kokkos::View<double*, ExecutionSpace> uCoarse_d("uCoarse", numCoarseNodes);
+  {
+    Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+        uCoarse_h(uCoarse, numCoarseNodes);
+    Kokkos::deep_copy(uCoarse_d, uCoarse_h);
+  }
 
   // Capture member variable for device lambda (avoid implicit 'this' capture)
   auto phiMFEM_local = phiMFEM_d;
