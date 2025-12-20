@@ -336,13 +336,14 @@ function build_block_diagonal_sparsity_kernel!(
     # Global thread index
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x - 1
 
-    # Each thread handles one colptr entry
+    # Each thread handles one colptr entry (1-based Julia indexing)
     if idx < nb * (nfree + 1)
         k = idx ÷ (nfree + 1)  # Block index
-        j = idx % (nfree + 1)   # Local column index
+        j = idx % (nfree + 1)   # Local column index (0 to nfree)
         offset_col = k * nfree
         offset_nnz = k * nnz_ii
-        @inbounds d_colptr[offset_col + j] = (
+        # +1 for Julia 1-based indexing
+        @inbounds d_colptr[offset_col + j + 1] = (
             d_colptrLocal[j + 1] + offset_nnz
         )
     end
@@ -370,13 +371,14 @@ function build_block_diagonal_csr_sparsity_kernel!(
     # Global thread index
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x - 1
 
-    # Each thread handles one rowptr entry
+    # Each thread handles one rowptr entry (1-based Julia indexing)
     if idx < nb * (nboundary + 1)
         k = idx ÷ (nboundary + 1)  # Block index
-        i = idx % (nboundary + 1)   # Local row index
+        i = idx % (nboundary + 1)   # Local row index (0 to nboundary)
         offset_row = k * nboundary
         offset_nnz = k * nnz_b
-        @inbounds d_rowptr[offset_row + i] = (
+        # +1 for Julia 1-based indexing
+        @inbounds d_rowptr[offset_row + i + 1] = (
             d_rowptrLocal[i + 1] + offset_nnz
         )
     end
@@ -903,10 +905,12 @@ function main()
         d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, (nfree_w, nfree_w)
     )
     d_btmp_w .= 1.0
-    _, _ = block_gmres(
-        K_warmup, d_btmp_w, d_utmp_w;
-        atol=1e-6, rtol=1e-6, itmax=5, verbose=0
-    )
+    # Use regular CG for each RHS column (warm-up)
+    for col = 1:size(d_btmp_w, 2)
+        x_col = view(d_utmp_w, :, col)
+        b_col = view(d_btmp_w, :, col)
+        cg(K_warmup, b_col; atol=1e-6, rtol=1e-6, itmax=5, verbose=0)
+    end
     CUDA.synchronize()
 
     # Warm-up kernel 6: transfer_utmp_to_phi
@@ -1108,19 +1112,24 @@ function main()
         d_colptr_ii, d_rowidx_ii, d_valK_ii, (n_total, n_total)
     )
 
-    # Solve K_ii * d_utmp = d_btmp using block GMRES
-    println("Solving block GMRES on GPU...")
+    # Solve K_ii * d_utmp = d_btmp using CG for each RHS column
+    println("Solving CG on GPU (3 RHS columns)...")
     t0 = time()
-    # d_utmp contains initial guess (third positional argument)
-    d_utmp, stats = block_gmres(
-        K_ii_gpu, d_btmp, d_utmp;
-        atol=1e-24, rtol=1e-12, itmax=1000, verbose=0
-    )
+    total_iters = 0
+    all_converged = true
+    for col = 1:size(d_btmp, 2)
+        b_col = view(d_btmp, :, col)
+        x0_col = view(d_utmp, :, col)
+        x_col, stats = cg(K_ii_gpu, b_col, x0_col;
+                          atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
+        copyto!(view(d_utmp, :, col), x_col)
+        total_iters += stats.niter
+        all_converged = all_converged && stats.solved
+    end
     gpu_cg_time = time() - t0
 
-    println("  Block GMRES converged: ", stats.solved)
-    println("  Iterations: ", stats.niter)
-    println("  Residual norm: ", length(stats.residuals) > 0 ? stats.residuals[end] : "N/A")
+    println("  CG converged: ", all_converged)
+    println("  Total iterations: ", total_iters)
     println("  GPU CG time: ", @sprintf("%.2f ms", gpu_cg_time * 1000))
     println()
 
