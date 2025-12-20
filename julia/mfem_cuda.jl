@@ -904,8 +904,8 @@ function main()
     )
     d_btmp_w .= 1.0
     _, _ = block_gmres(
-        K_warmup, d_btmp_w;
-        X0=d_utmp_w, atol=1e-6, rtol=1e-6, itmax=5, verbose=0
+        K_warmup, d_btmp_w, d_utmp_w;
+        atol=1e-6, rtol=1e-6, itmax=5, verbose=0
     )
     CUDA.synchronize()
 
@@ -1111,10 +1111,10 @@ function main()
     # Solve K_ii * d_utmp = d_btmp using block GMRES
     println("Solving block GMRES on GPU...")
     t0 = time()
-    # d_utmp contains initial guess (X0)
+    # d_utmp contains initial guess (third positional argument)
     d_utmp, stats = block_gmres(
-        K_ii_gpu, d_btmp;
-        X0=d_utmp, atol=1e-24, rtol=1e-12, itmax=1000, verbose=0
+        K_ii_gpu, d_btmp, d_utmp;
+        atol=1e-24, rtol=1e-12, itmax=1000, verbose=0
     )
     gpu_cg_time = time() - t0
 
