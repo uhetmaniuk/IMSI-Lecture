@@ -17,7 +17,7 @@
 using CUDA
 using CUDA.CUSPARSE
 using Krylov
-import Krylov: CgSolver, cg!
+import Krylov: CgWorkspace, cg!
 using SparseArrays
 using LinearAlgebra
 using Printf
@@ -1164,7 +1164,7 @@ function main()
 
     # Create CG solver workspace once (reused for all RHS columns)
     b_col = view(d_btmp, :, 1)
-    solver = CgSolver(K_ii_gpu, b_col)
+    solver = CgWorkspace(K_ii_gpu, b_col)
 
     for col = 1:size(d_btmp, 2)
         b_col = view(d_btmp, :, col)
