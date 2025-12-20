@@ -1183,8 +1183,8 @@ function main()
     # Each block has size nfree x nfree, and there are nb blocks
     println("Building block Jacobi preconditioner...")
     t0_prec = time()
+    # BlockJacobiPreconditioner extracts and factorizes blocks during construction
     precond = BlockJacobiPreconditioner(K_ii_gpu, nb, CUDABackend())
-    update!(precond, K_ii_gpu)
     prec_time = time() - t0_prec
     println("  Preconditioner build time: ", @sprintf("%.2f ms", prec_time * 1000))
 
