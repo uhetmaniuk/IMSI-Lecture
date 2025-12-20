@@ -112,7 +112,7 @@ end
 function assemble_Kii_kernel!(
     d_valK_ii, d_btmp, d_rhs_fine, d_phi, d_colptr, d_rowidx,
     d_globalToFree, d_valK_b, d_rowptr_b, d_colidx_b, d_globalToBoundary,
-    nx, ny, ratio, nfree, nnz_ii, nboundary, nnz_b, numVectorsToSolve,
+    nx, ny, ratio, log2_ratio, nfree, nnz_ii, nboundary, nnz_b, numVectorsToSolve,
     numNodes
 )
     # One thread per coarse element
@@ -131,8 +131,9 @@ function assemble_Kii_kernel!(
         y_c0 = Float64(iy_coarse) * hy_coarse
 
         # Fine element size within this coarse element
-        hx = hx_coarse / ratio
-        hy = hy_coarse / ratio
+        # Use ldexp for exact division by power of 2
+        hx = ldexp(hx_coarse, -log2_ratio)
+        hy = ldexp(hy_coarse, -log2_ratio)
 
         # Offset for this block's K_ii and K_b in the global arrays
         offset_ii = (iel - 1) * nnz_ii
@@ -777,6 +778,12 @@ function main()
     nx, ny = 32, 32  # Coarse mesh (MFEM)
     ratio = 32        # Fine grid refinement ratio per coarse element
 
+    # Validate ratio is a power of 2 (required for exact floating-point arithmetic)
+    if !ispow2(ratio)
+        error("ratio must be a power of 2 (got $ratio). Use 16, 32, 64, 128, etc.")
+    end
+    log2_ratio = trailing_zeros(ratio)  # Fast log2 for power of 2
+
     println("Generating coarse mesh: $nx x $ny MFEM elements")
     println(
         "MFEM ratio: $ratio (each coarse element has " *
@@ -922,10 +929,11 @@ function main()
     CUDA.synchronize()
 
     # Warm-up kernel 4: assemble_Kii (main assembly kernel)
+    log2_ratio_warmup = trailing_zeros(ratio_warmup)
     @cuda threads=64 blocks=1 assemble_Kii_kernel!(
         d_valK_ii_w, d_btmp_w, d_rhs_fine_w, d_phi_w, d_colptr_ii_w,
         d_rowidx_ii_w, d_globalToFree_w, d_valK_b_w, d_rowptr_b_w,
-        d_colidx_b_w, d_globalToBoundary_w, 1, 1, ratio_warmup, nfree_w,
+        d_colidx_b_w, d_globalToBoundary_w, 1, 1, ratio_warmup, log2_ratio_warmup, nfree_w,
         nnz_ii_w, nboundary_w, nnz_b_w, 3, numNodes_warmup
     )
     CUDA.synchronize()
@@ -1037,8 +1045,9 @@ function main()
             nodeID = ix + iy * (ratio + 1) + 1
 
             # Normalized coordinates within the coarse element [0,1] × [0,1]
-            xi = Float64(ix) / ratio
-            eta = Float64(iy) / ratio
+            # Use ldexp for exact division by power of 2
+            xi = ldexp(Float64(ix), -log2_ratio)
+            eta = ldexp(Float64(iy), -log2_ratio)
 
             # Evaluate Q1 basis functions at (xi, eta)
             # Q1 nodes: [1] bottom-left, [2] bottom-right,
@@ -1125,7 +1134,7 @@ function main()
     @cuda threads=threads_per_block blocks=num_blocks assemble_Kii_kernel!(
         d_valK_ii, d_btmp, d_rhs_fine, d_phi, d_colptr_ii, d_rowidx_ii,
         d_globalToFree, d_valK_b, d_rowptr_b, d_colidx_b,
-        d_globalToBoundary, nx, ny, ratio, nfree, nnz_ii, nboundary,
+        d_globalToBoundary, nx, ny, ratio, log2_ratio, nfree, nnz_ii, nboundary,
         nnz_b, numVectorsToSolve, numNodes
     )
     CUDA.synchronize()
