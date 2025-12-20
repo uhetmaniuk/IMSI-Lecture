@@ -18,6 +18,7 @@ using CUDA
 using CUDA.CUSPARSE
 using Krylov
 import Krylov: CgWorkspace, cg!
+using KrylovPreconditioners
 using SparseArrays
 using LinearAlgebra
 using Printf
@@ -44,16 +45,30 @@ using .MFEMWorkspace
 # ========================================================================
 
 # Device functions for material coefficients and forcing term
+# Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
+const USE_VARYING_COEFFICIENTS = false
+
 @inline function ax_func(x, y)
-    return 1.0  # Diffusion coefficient in x-direction
+    if USE_VARYING_COEFFICIENTS
+        # Varying coefficient: 1 + 0.5*sin(2πx)*sin(2πy)
+        return 1.0 + 0.5 * sin(2π * x) * sin(2π * y)
+    else
+        return 1.0  # Constant diffusion coefficient
+    end
 end
 
 @inline function ay_func(x, y)
-    return 1.0  # Diffusion coefficient in y-direction
+    if USE_VARYING_COEFFICIENTS
+        # Varying coefficient: 1 + 0.5*cos(2πx)*cos(2πy)
+        return 1.0 + 0.5 * cos(2π * x) * cos(2π * y)
+    else
+        return 1.0  # Constant diffusion coefficient
+    end
 end
 
 @inline function f_func(x, y)
     # Manufactured solution: u = sin(π*x) * sin(π*y)
+    # Note: For varying coefficients, this RHS is no longer exact
     return 2.0 * π^2 * sin(π * x) * sin(π * y)
 end
 
@@ -1164,6 +1179,15 @@ function main()
         d_colptr_ii, d_rowidx_ii, d_valK_ii, (n_total, n_total)
     )
 
+    # Build block Jacobi preconditioner for the block-diagonal K_ii
+    # Each block has size nfree x nfree, and there are nb blocks
+    println("Building block Jacobi preconditioner...")
+    t0_prec = time()
+    precond = BlockJacobiPreconditioner(K_ii_gpu, nb, CUDABackend())
+    update!(precond, K_ii_gpu)
+    prec_time = time() - t0_prec
+    println("  Preconditioner build time: ", @sprintf("%.2f ms", prec_time * 1000))
+
     # Solve K_ii * d_utmp = d_btmp using CG for each RHS column
     # Use CgSolver workspace for memory reuse and proper warm-start
     println("Solving CG on GPU (3 RHS columns)...")
@@ -1194,9 +1218,9 @@ function main()
             # Solution is already in x0_col (d_utmp), no copy needed
             total_iters += 0
         else
-            # Need to solve - use cg! with warm-start
+            # Need to solve - use cg! with warm-start and block Jacobi preconditioner
             solver = cg!(solver, K_ii_gpu, b_col, x0_col;
-                atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
+                M=precond, atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
             copyto!(view(d_utmp, :, col), solver.x)
             total_iters += solver.stats.niter
             all_converged = all_converged && solver.stats.solved
