@@ -168,7 +168,7 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 32, 32
+    nx, ny = 128, 128
     println("Generating mesh: $nx x $ny Q1 elements")
 
     t0 = time()

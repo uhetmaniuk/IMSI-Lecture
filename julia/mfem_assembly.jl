@@ -30,107 +30,13 @@ using .FEMBase
 include("PCG.jl")
 using .PCG
 
+# Load MFEM workspace (includes FEMBase and PCG)
+include("MFEMWorkspace.jl")
+using .MFEMWorkspace
+
 # ============================================================================
 # MFEM-Specific Functions
 # ============================================================================
-
-"""
-Workspace for MFEM element assembly (reused across elements to avoid allocations)
-"""
-struct MFEWorkspace{T<:AbstractFloat, Dim, NNodes}
-    # DOF mapping arrays
-    globalToFree::Vector{Int}
-    freeToGlobal::Vector{Int}
-    globalToBoundary::Vector{Int}
-    boundaryToGlobal::Vector{Int}
-
-    # K_ii (interior-interior) sparse matrix arrays
-    colptr_ii::Vector{Int}
-    rowidx_ii::Vector{Int}
-    nzval_ii::Vector{T}
-
-    # K_b (boundary-all) sparse matrix arrays
-    matRowPtr_b::Vector{Int}
-    matColIdx_b::Vector{Int}
-    matValues_b::Vector{T}
-
-    # RHS and basis function arrays
-    rhs_fine::Vector{T}
-    btmp::Matrix{T}
-    phi::Matrix{T}
-    utmp_init::Matrix{T}
-    utmp::Matrix{T}
-
-    # Coarse element matrices (output of compute_mfem_element!)
-    Ke_coarse::Matrix{T}
-    fe_coarse::Vector{T}
-
-    # Coarse element data (separate from fine element workspace to avoid conflicts)
-    nodes_coarse::Vector{Int}
-    x_coarse::Vector{T}
-    y_coarse::Vector{T}
-
-    # PCG solver workspace (pre-allocated for in-place solving)
-    pcg_workspace::PCG.PCGWorkspace{T}
-
-    # Fine element assembly workspace (contains Ke, fe, x_coords, y_coords, nodes)
-    element::ElementWorkspace{T, Dim, NNodes}
-end
-
-"""
-Constructor for MFEWorkspace - pre-allocates all arrays based on ratio
-"""
-function MFEWorkspace{T, Dim, NNodes}(ratio::Int) where {T<:AbstractFloat, Dim, NNodes}
-    numNodes = (ratio + 1) * (ratio + 1)
-    numVectors = 4
-    numVectorsToSolve = 3
-    nfree = numNodes - 4 * ratio
-    nboundary = 4 * ratio
-
-    # Pre-allocate with maximum possible sizes (9-point stencil)
-    max_nnz_ii = 9 * nfree
-    max_nnz_b = 9 * nboundary
-
-    return MFEWorkspace{T, Dim, NNodes}(
-        # DOF mappings
-        fill(-1, numNodes),           # globalToFree
-        zeros(Int, nfree),            # freeToGlobal
-        fill(-1, numNodes),           # globalToBoundary
-        zeros(Int, nboundary),        # boundaryToGlobal
-
-        # K_ii arrays
-        zeros(Int, nfree + 1),        # colptr_ii
-        zeros(Int, max_nnz_ii),       # rowidx_ii
-        zeros(T, max_nnz_ii),         # nzval_ii
-
-        # K_b arrays
-        zeros(Int, nboundary + 1),    # matRowPtr_b
-        zeros(Int, max_nnz_b),        # matColIdx_b
-        zeros(T, max_nnz_b),          # matValues_b
-
-        # RHS and basis functions
-        zeros(T, numNodes),           # rhs_fine
-        zeros(T, nfree, numVectorsToSolve),  # btmp
-        zeros(T, numNodes, numVectors),      # phi
-        zeros(T, nfree, numVectorsToSolve),  # utmp_init
-        zeros(T, nfree, numVectorsToSolve),  # utmp
-
-        # Coarse element matrices
-        zeros(T, 4, 4),               # Ke_coarse
-        zeros(T, 4),                  # fe_coarse
-
-        # Coarse element data
-        zeros(Int, 4),                # nodes_coarse
-        zeros(T, 4),                  # x_coarse
-        zeros(T, 4),                  # y_coarse
-
-        # PCG solver workspace (pre-allocated for nfree interior DOFs)
-        PCG.PCGWorkspace{T}(nfree),
-
-        # Fine element workspace (contains Ke, fe, x_coords, y_coords, nodes)
-        ElementWorkspace{T, Dim, NNodes}()
-    )
-end
 
 """
 Compute MFEM basis functions and coarse element matrices
@@ -147,239 +53,20 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
     numVectors = 4  # Number of coarse basis functions
     numVectorsToSolve = 3  # Solve only 3, get 4th from partition of unity
 
-    # Use pre-allocated DOF mapping arrays from workspace
+    # Build DOF mappings and sparsity patterns using reusable kernel from FEMBase
+    nfree, nboundary, nnz_ii, nnz_b = build_mfem_local_sparsity!(workspace, ratio, ratio)
+
+    # Extract arrays from workspace for later use
     globalToFree = workspace.globalToFree
     freeToGlobal = workspace.freeToGlobal
     globalToBoundary = workspace.globalToBoundary
     boundaryToGlobal = workspace.boundaryToGlobal
-
-    # Reset DOF mappings
-    fill!(globalToFree, -1)
-    fill!(globalToBoundary, -1)
-
-    nfree = 0;
-    nboundary = 0;
-    for iy = 0:ratio
-        for ix = 0:ratio
-            nodeID = ix + iy * (ratio + 1) + 1
-            # Interior nodes
-            if ix > 0 && ix < ratio && iy > 0 && iy < ratio
-                nfree = nfree + 1
-                @inbounds freeToGlobal[nfree] = nodeID
-                @inbounds globalToFree[nodeID] = nfree;
-            else
-                # Boundary nodes
-                nboundary = nboundary + 1;
-                @inbounds boundaryToGlobal[nboundary] = nodeID
-                @inbounds globalToBoundary[nodeID] = nboundary
-            end
-        end
-    end
-
-    # Use pre-allocated K_ii arrays from workspace
     colptr_ii = workspace.colptr_ii
     rowidx_ii = workspace.rowidx_ii
     nzval_ii = workspace.nzval_ii
-
-    # Reset K_ii arrays
-    fill!(nzval_ii, 0.0)
-
-    # Build K_ii sparsity pattern (interior-interior coupling)
-    # Note: We build the sparsity row-wise (CSR-style) but store in CSC format.
-    # Since K_ii is symmetric, building A^T is equivalent to building A.
-    colptr_ii[1] = 1
-
-    for i = 1:nfree
-        @inbounds iGlobal = freeToGlobal[i]
-        ix = (iGlobal - 1) % (ratio + 1)
-        iy = (iGlobal - 1) ÷ (ratio + 1)
-
-        # Count interior neighbors in 9-point stencil
-        count = 1  # Diagonal
-        hasWest = (ix > 1)
-        hasEast = (ix < ratio - 1)
-        hasSouth = (iy > 1)
-        hasNorth = (iy < ratio - 1)
-
-        # South neighbors
-        if hasSouth
-            count += hasWest + 1 + hasEast
-        end
-        # West and East
-        count += hasWest + hasEast
-        # North neighbors
-        if hasNorth
-            count += hasWest + 1 + hasEast
-        end
-
-        @inbounds colptr_ii[i + 1] = colptr_ii[i] + count
-    end
-
-    @inbounds nnz_ii = colptr_ii[nfree + 1] - 1
-
-    # Fill K_ii sparsity (building row-wise, stored as CSC due to symmetry)
-    for i = 1:nfree
-        @inbounds iGlobal = freeToGlobal[i]
-        ix = (iGlobal - 1) % (ratio + 1)
-        iy = (iGlobal - 1) ÷ (ratio + 1)
-        @inbounds offset = colptr_ii[i]
-
-        # Add interior neighbors
-        # South row
-        if iy > 1
-            if ix > 1
-                jGlobal = iGlobal - 1 - (ratio + 1)
-                @inbounds jFree = globalToFree[jGlobal]
-                if jFree != -1
-                    @inbounds rowidx_ii[offset] = jFree
-                    offset += 1
-                end
-            end
-            jGlobal = iGlobal - (ratio + 1)
-            @inbounds jFree = globalToFree[jGlobal]
-            if jFree != -1
-                @inbounds rowidx_ii[offset] = jFree
-                offset += 1
-            end
-            if ix < ratio - 1
-                jGlobal = iGlobal + 1 - (ratio + 1)
-                @inbounds jFree = globalToFree[jGlobal]
-                if jFree != -1
-                    @inbounds rowidx_ii[offset] = jFree
-                    offset += 1
-                end
-            end
-        end
-        # West
-        if ix > 1
-            jGlobal = iGlobal - 1
-            @inbounds jFree = globalToFree[jGlobal]
-            if jFree != -1
-                @inbounds rowidx_ii[offset] = jFree
-                offset += 1
-            end
-        end
-        # Diagonal
-        @inbounds rowidx_ii[offset] = i
-        offset += 1
-        # East
-        if ix < ratio - 1
-            jGlobal = iGlobal + 1
-            @inbounds jFree = globalToFree[jGlobal]
-            if jFree != -1
-                @inbounds rowidx_ii[offset] = jFree
-                offset += 1
-            end
-        end
-        # North row
-        if iy < ratio - 1
-            if ix > 1
-                jGlobal = iGlobal - 1 + (ratio + 1)
-                @inbounds jFree = globalToFree[jGlobal]
-                if jFree != -1
-                    @inbounds rowidx_ii[offset] = jFree
-                    offset += 1
-                end
-            end
-            jGlobal = iGlobal + (ratio + 1)
-            @inbounds jFree = globalToFree[jGlobal]
-            if jFree != -1
-                @inbounds rowidx_ii[offset] = jFree
-                offset += 1
-            end
-            if ix < ratio - 1
-                jGlobal = iGlobal + 1 + (ratio + 1)
-                @inbounds jFree = globalToFree[jGlobal]
-                if jFree != -1
-                    @inbounds rowidx_ii[offset] = jFree
-                    offset += 1
-                end
-            end
-        end
-    end
-
-    # Use pre-allocated K_b arrays from workspace
     matRowPtr_b = workspace.matRowPtr_b
     matColIdx_b = workspace.matColIdx_b
     matValues_b = workspace.matValues_b
-
-    # Reset K_b arrays
-    fill!(matValues_b, 0.0)
-
-    # Build K_b sparsity pattern (boundary-all coupling)
-    @inbounds matRowPtr_b[1] = 1
-
-    for i = 1:nboundary
-        @inbounds iGlobal = boundaryToGlobal[i]
-        ix = (iGlobal - 1) % (ratio + 1)
-        iy = (iGlobal - 1) ÷ (ratio + 1)
-
-        # Count all neighbors (boundary and interior) in global numbering
-        count = 1  # Diagonal
-        hasWest = (ix > 0)
-        hasEast = (ix < ratio)
-
-        count += hasWest + hasEast
-        if iy > 0
-            count += 1 + hasWest + hasEast
-        end
-        if iy < ratio
-            count += 1 + hasWest + hasEast
-        end
-
-        @inbounds matRowPtr_b[i + 1] = matRowPtr_b[i] + count
-    end
-
-    @inbounds nnz_b = matRowPtr_b[nboundary + 1] - 1
-
-    # Fill K_b column indices (in global node numbering)
-    for i = 1:nboundary
-        @inbounds iGlobal = boundaryToGlobal[i]
-        ix = (iGlobal - 1) % (ratio + 1)
-        iy = (iGlobal - 1) ÷ (ratio + 1)
-        @inbounds offset = matRowPtr_b[i]
-
-        # Add all neighbors
-        # South row
-        if iy > 0
-            if ix > 0
-                @inbounds matColIdx_b[offset] = iGlobal - 1 - (ratio + 1)
-                offset += 1
-            end
-            @inbounds matColIdx_b[offset] = iGlobal - (ratio + 1)
-            offset += 1
-            if ix < ratio
-                @inbounds matColIdx_b[offset] = iGlobal + 1 - (ratio + 1)
-                offset += 1
-            end
-        end
-        # West
-        if ix > 0
-            @inbounds matColIdx_b[offset] = iGlobal - 1
-            offset += 1
-        end
-        # Diagonal
-        @inbounds matColIdx_b[offset] = iGlobal
-        offset += 1
-        # East
-        if ix < ratio
-            @inbounds matColIdx_b[offset] = iGlobal + 1
-            offset += 1
-        end
-        # North row
-        if iy < ratio
-            if ix > 0
-                @inbounds matColIdx_b[offset] = iGlobal - 1 + (ratio + 1)
-                offset += 1
-            end
-            @inbounds matColIdx_b[offset] = iGlobal + (ratio + 1)
-            offset += 1
-            if ix < ratio
-                @inbounds matColIdx_b[offset] = iGlobal + 1 + (ratio + 1)
-                offset += 1
-            end
-        end
-    end
 
     # Use pre-allocated RHS and basis function arrays from workspace
     rhs_fine = workspace.rhs_fine
@@ -779,7 +466,7 @@ function main()
     nx, ny = 16, 16  # Coarse mesh (MFEM)
     ratio = 32        # Fine grid refinement ratio per coarse element
 
-    println("Generating coarse mesh: $nx x $ny Q1 elements")
+    println("Generating coarse mesh: $nx x $ny MFEM elements")
     println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
     println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
     println()

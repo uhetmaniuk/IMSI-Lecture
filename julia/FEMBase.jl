@@ -21,6 +21,7 @@ export assemble_element!
 export find_matrix_position, apply_boundary_conditions
 export write_solution
 export shape_functions!, shape_gradients!
+export build_mfem_local_sparsity!
 
 # ============================================================================
 # Q1 Finite Element (2D Bilinear Quadrilateral)
@@ -540,6 +541,276 @@ function write_solution(filename::String, mesh::Mesh, solution::Vector{Float64})
             @printf(io, "%.6f %.6f %.6e\n", mesh.vertex_x[i], mesh.vertex_y[i], solution[i])
         end
     end
+end
+
+# ============================================================================
+# MFEM Local Sparsity Pattern Construction
+# ============================================================================
+
+"""
+    build_mfem_local_sparsity!(workspace, ratio_x, ratio_y) -> (nfree, nboundary, nnz_ii, nnz_b)
+
+Build DOF mappings and sparsity patterns for MFEM static condensation of a single element.
+
+This function constructs:
+1. DOF mappings separating interior (free) and boundary nodes
+2. K_ii sparsity pattern: interior-interior coupling (9-point stencil)
+3. K_b sparsity pattern: boundary-all coupling
+
+The fine grid has (ratio_x+1) × (ratio_y+1) nodes.
+
+# Arguments
+- `workspace`: Pre-allocated workspace containing arrays to fill
+- `ratio_x::Int`: Refinement ratio in x-direction
+- `ratio_y::Int`: Refinement ratio in y-direction
+
+# Returns
+- `nfree::Int`: Number of interior (free) DOFs
+- `nboundary::Int`: Number of boundary DOFs
+- `nnz_ii::Int`: Number of nonzeros in K_ii
+- `nnz_b::Int`: Number of nonzeros in K_b
+
+# Notes
+- Fills workspace arrays in-place (no allocations)
+- For square fine grids, use same value for ratio_x and ratio_y
+- Node numbering: nodeID = ix + iy * (ratio_x + 1) + 1 (1-based)
+"""
+function build_mfem_local_sparsity!(workspace, ratio_x::Int, ratio_y::Int)
+    # Extract DOF mapping arrays from workspace
+    globalToFree = workspace.globalToFree
+    freeToGlobal = workspace.freeToGlobal
+    globalToBoundary = workspace.globalToBoundary
+    boundaryToGlobal = workspace.boundaryToGlobal
+
+    # Reset DOF mappings
+    fill!(globalToFree, -1)
+    fill!(globalToBoundary, -1)
+
+    # Build DOF mappings: separate interior and boundary nodes
+    nfree = 0
+    nboundary = 0
+    for iy = 0:ratio_y
+        for ix = 0:ratio_x
+            nodeID = ix + iy * (ratio_x + 1) + 1
+            # Interior nodes
+            if ix > 0 && ix < ratio_x && iy > 0 && iy < ratio_y
+                nfree = nfree + 1
+                @inbounds freeToGlobal[nfree] = nodeID
+                @inbounds globalToFree[nodeID] = nfree
+            else
+                # Boundary nodes
+                nboundary = nboundary + 1
+                @inbounds boundaryToGlobal[nboundary] = nodeID
+                @inbounds globalToBoundary[nodeID] = nboundary
+            end
+        end
+    end
+
+    # Extract K_ii arrays from workspace
+    colptr_ii = workspace.colptr_ii
+    rowidx_ii = workspace.rowidx_ii
+    nzval_ii = workspace.nzval_ii
+
+    # Reset K_ii values (sparsity pattern will be rebuilt)
+    fill!(nzval_ii, 0.0)
+
+    # Build K_ii sparsity pattern (interior-interior coupling)
+    # Note: Building row-wise (CSR-style) but stored as CSC due to symmetry
+    colptr_ii[1] = 1
+
+    for i = 1:nfree
+        @inbounds iGlobal = freeToGlobal[i]
+        ix = (iGlobal - 1) % (ratio_x + 1)
+        iy = (iGlobal - 1) ÷ (ratio_x + 1)
+
+        # Count interior neighbors in 9-point stencil
+        count = 1  # Diagonal
+        hasWest = (ix > 1)
+        hasEast = (ix < ratio_x - 1)
+        hasSouth = (iy > 1)
+        hasNorth = (iy < ratio_y - 1)
+
+        # South neighbors
+        if hasSouth
+            count += hasWest + 1 + hasEast
+        end
+        # West and East
+        count += hasWest + hasEast
+        # North neighbors
+        if hasNorth
+            count += hasWest + 1 + hasEast
+        end
+
+        @inbounds colptr_ii[i + 1] = colptr_ii[i] + count
+    end
+
+    @inbounds nnz_ii = colptr_ii[nfree + 1] - 1
+
+    # Fill K_ii sparsity (building row-wise, stored as CSC due to symmetry)
+    for i = 1:nfree
+        @inbounds iGlobal = freeToGlobal[i]
+        ix = (iGlobal - 1) % (ratio_x + 1)
+        iy = (iGlobal - 1) ÷ (ratio_x + 1)
+        @inbounds offset = colptr_ii[i]
+
+        # Add interior neighbors
+        # South row
+        if iy > 1
+            if ix > 1
+                jGlobal = iGlobal - 1 - (ratio_x + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+            jGlobal = iGlobal - (ratio_x + 1)
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+            if ix < ratio_x - 1
+                jGlobal = iGlobal + 1 - (ratio_x + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+        end
+        # West
+        if ix > 1
+            jGlobal = iGlobal - 1
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+        end
+        # Diagonal
+        @inbounds rowidx_ii[offset] = i
+        offset += 1
+        # East
+        if ix < ratio_x - 1
+            jGlobal = iGlobal + 1
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+        end
+        # North row
+        if iy < ratio_y - 1
+            if ix > 1
+                jGlobal = iGlobal - 1 + (ratio_x + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+            jGlobal = iGlobal + (ratio_x + 1)
+            @inbounds jFree = globalToFree[jGlobal]
+            if jFree != -1
+                @inbounds rowidx_ii[offset] = jFree
+                offset += 1
+            end
+            if ix < ratio_x - 1
+                jGlobal = iGlobal + 1 + (ratio_x + 1)
+                @inbounds jFree = globalToFree[jGlobal]
+                if jFree != -1
+                    @inbounds rowidx_ii[offset] = jFree
+                    offset += 1
+                end
+            end
+        end
+    end
+
+    # Extract K_b arrays from workspace
+    matRowPtr_b = workspace.matRowPtr_b
+    matColIdx_b = workspace.matColIdx_b
+    matValues_b = workspace.matValues_b
+
+    # Reset K_b values (sparsity pattern will be rebuilt)
+    fill!(matValues_b, 0.0)
+
+    # Build K_b sparsity pattern (boundary-all coupling)
+    @inbounds matRowPtr_b[1] = 1
+
+    for i = 1:nboundary
+        @inbounds iGlobal = boundaryToGlobal[i]
+        ix = (iGlobal - 1) % (ratio_x + 1)
+        iy = (iGlobal - 1) ÷ (ratio_x + 1)
+
+        # Count all neighbors (boundary and interior) in global numbering
+        count = 1  # Diagonal
+        hasWest = (ix > 0)
+        hasEast = (ix < ratio_x)
+
+        count += hasWest + hasEast
+        if iy > 0
+            count += 1 + hasWest + hasEast
+        end
+        if iy < ratio_y
+            count += 1 + hasWest + hasEast
+        end
+
+        @inbounds matRowPtr_b[i + 1] = matRowPtr_b[i] + count
+    end
+
+    @inbounds nnz_b = matRowPtr_b[nboundary + 1] - 1
+
+    # Fill K_b column indices (in global node numbering)
+    for i = 1:nboundary
+        @inbounds iGlobal = boundaryToGlobal[i]
+        ix = (iGlobal - 1) % (ratio_x + 1)
+        iy = (iGlobal - 1) ÷ (ratio_x + 1)
+        @inbounds offset = matRowPtr_b[i]
+
+        # Add all neighbors
+        # South row
+        if iy > 0
+            if ix > 0
+                @inbounds matColIdx_b[offset] = iGlobal - 1 - (ratio_x + 1)
+                offset += 1
+            end
+            @inbounds matColIdx_b[offset] = iGlobal - (ratio_x + 1)
+            offset += 1
+            if ix < ratio_x
+                @inbounds matColIdx_b[offset] = iGlobal + 1 - (ratio_x + 1)
+                offset += 1
+            end
+        end
+        # West
+        if ix > 0
+            @inbounds matColIdx_b[offset] = iGlobal - 1
+            offset += 1
+        end
+        # Diagonal
+        @inbounds matColIdx_b[offset] = iGlobal
+        offset += 1
+        # East
+        if ix < ratio_x
+            @inbounds matColIdx_b[offset] = iGlobal + 1
+            offset += 1
+        end
+        # North row
+        if iy < ratio_y
+            if ix > 0
+                @inbounds matColIdx_b[offset] = iGlobal - 1 + (ratio_x + 1)
+                offset += 1
+            end
+            @inbounds matColIdx_b[offset] = iGlobal + (ratio_x + 1)
+            offset += 1
+            if ix < ratio_x
+                @inbounds matColIdx_b[offset] = iGlobal + 1 + (ratio_x + 1)
+                offset += 1
+            end
+        end
+    end
+
+    return nfree, nboundary, nnz_ii, nnz_b
 end
 
 end # module FEMBase
