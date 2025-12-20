@@ -591,7 +591,8 @@ end
 # fe_coarse[iel, ir] = phi[iel, :, ir]' * rhs_fine[iel, :]
 # Ke_coarse[iel, ir, jr] = phi[iel, :, ir]' * K_b[iel, :, :] * phi[iel, :, jr]
 # Uses shared memory reduction for efficiency and to minimize atomic
-# contention
+# contention. Optimized version caches phi values for boundary nodes
+# in shared memory to reduce global memory traffic.
 function compute_fe_Ke_coarse_kernel!(
     d_fe_coarse, d_Ke_coarse, d_phi, d_rhs_fine,
     d_valK_b, d_rowptr_b, d_colidx_b, d_boundaryToGlobal,
@@ -607,22 +608,42 @@ function compute_fe_Ke_coarse_kernel!(
 
     # Offsets for this element's data
     offset_nodes = (iel - 1) * numNodes
-    offset_b = (iel - 1) * nnz_b
 
-    # Shared memory layout:
-    # - First blockDim().x * numVectors for fe_coarse reduction
-    # - Next blockDim().x * 16 for Ke_coarse local accumulation
-    #   (16 = 4x4 matrix)
+    # Shared memory layout (all offsets in Float64 elements):
+    # - sdata_fe: blockDim().x * numVectors for fe_coarse reduction
+    # - sdata_Ke: blockDim().x * 16 for Ke_coarse local accumulation
+    # - sdata_phi_boundary: nboundary * numVectors for boundary phi cache
     sdata_fe = @cuDynamicSharedMem(Float64, blockDim().x * numVectors)
+    offset_Ke = blockDim().x * numVectors
     sdata_Ke = @cuDynamicSharedMem(
         Float64, blockDim().x * 16,
-        blockDim().x * numVectors * sizeof(Float64)
+        offset_Ke * sizeof(Float64)
+    )
+    offset_phi = offset_Ke + blockDim().x * 16
+    sdata_phi_boundary = @cuDynamicSharedMem(
+        Float64, nboundary * numVectors,
+        offset_phi * sizeof(Float64)
     )
 
     # Initialize Ke_coarse local accumulator
     for i = 1:16
         @inbounds sdata_Ke[(tid - 1) * 16 + i] = 0.0
     end
+
+    # ====================================================================
+    # Load phi values for boundary nodes into shared memory
+    # ====================================================================
+    # Layout: sdata_phi_boundary[(ib-1)*numVectors + ir] = phi[boundary_node_ib, ir]
+    # This avoids repeated global memory reads in the Ke computation
+    total_phi_entries = nboundary * numVectors
+    for idx = tid:blockDim().x:total_phi_entries
+        ib = (idx - 1) ÷ numVectors + 1   # Boundary node index (1 to nboundary)
+        ir = (idx - 1) % numVectors + 1   # Basis function index (1 to numVectors)
+        @inbounds iGlobal = d_boundaryToGlobal[ib]
+        @inbounds sdata_phi_boundary[idx] = d_phi[offset_nodes + iGlobal, ir]
+    end
+
+    sync_threads()
 
     # ====================================================================
     # Part 1: Compute fe_coarse using reduction
@@ -681,9 +702,6 @@ function compute_fe_Ke_coarse_kernel!(
 
     for iBoundary_local = tid:blockDim().x:nboundary
         if iBoundary_local <= nboundary
-            # Global node index for this boundary node (local within element)
-            @inbounds iGlobal = d_boundaryToGlobal[iBoundary_local]
-
             # Global boundary index for rowptr lookup
             iBoundary_global = block_offset_boundary + iBoundary_local
 
@@ -704,10 +722,13 @@ function compute_fe_Ke_coarse_kernel!(
                 # function pairs. Store in thread-local shared memory
                 # (NO atomics here!)
                 for ir = 1:numVectors
-                    @inbounds phi_i = d_phi[offset_nodes + iGlobal, ir]
+                    # Read phi_i from shared memory (cached boundary values)
+                    phi_idx_i = (iBoundary_local - 1) * numVectors + ir
+                    @inbounds phi_i = sdata_phi_boundary[phi_idx_i]
                     phi_i_k = phi_i * k_val
 
                     for jr = 1:numVectors
+                        # Read phi_j from global memory (jGlobal can be any node)
                         @inbounds phi_j = d_phi[offset_nodes + jGlobal, jr]
                         contribution = phi_i_k * phi_j
 
@@ -945,7 +966,8 @@ function main()
     # Warm-up kernel 7: compute_fe_Ke_coarse
     d_fe_coarse_w = CUDA.zeros(Float64, nb_warmup, 4)
     d_Ke_coarse_w = CUDA.zeros(Float64, nb_warmup, 16)
-    shared_mem_w = 32 * (4 + 16) * sizeof(Float64)
+    # Shared memory: fe (32*4) + Ke (32*16) + phi_boundary (nboundary_w*4)
+    shared_mem_w = (32 * (4 + 16) + nboundary_w * 4) * sizeof(Float64)
     @cuda threads=32 blocks=1 shmem=shared_mem_w (
         compute_fe_Ke_coarse_kernel!(
             d_fe_coarse_w, d_Ke_coarse_w, d_phi_w, d_rhs_fine_w,
@@ -1178,9 +1200,13 @@ function main()
 
     threads_per_block = 128  # Use 128 threads for better occupancy
     num_blocks = nb  # One block per coarse element
-    # Shared memory: fe_coarse reduction (threads * 4) +
-    # Ke_coarse local accumulation (threads * 16)
-    shared_mem_size = threads_per_block * (numVectors + 16) * sizeof(Float64)
+    # Shared memory layout:
+    # - fe_coarse reduction: threads * numVectors
+    # - Ke_coarse local accumulation: threads * 16
+    # - phi boundary cache: nboundary * numVectors (NEW)
+    shared_mem_size = (
+        threads_per_block * (numVectors + 16) + nboundary * numVectors
+    ) * sizeof(Float64)
 
     @cuda threads=threads_per_block blocks=num_blocks shmem=shared_mem_size (
         compute_fe_Ke_coarse_kernel!(
@@ -1364,50 +1390,47 @@ function main()
     # ====================================================================
 
     println("="^70)
-    println("Performance Summary")
+    println("Performance Summary (in execution order)")
     println("="^70)
-    println("CPU Timings:")
     println(
-        "  Mesh generation:     ",
-        @sprintf("%8.2f ms", mesh_time * 1000)
+        "  Mesh generation:       ",
+        @sprintf("%8.2f ms", mesh_time * 1000), "  (CPU)"
     )
     println(
-        "  Coarse connectivity: ",
-        @sprintf("%8.2f ms", conn_time * 1000)
+        "  Coarse connectivity:   ",
+        @sprintf("%8.2f ms", conn_time * 1000), "  (CPU)"
     )
     println(
-        "  Local connectivity:  ",
-        @sprintf("%8.2f ms", local_conn_time * 1000)
+        "  Local connectivity:    ",
+        @sprintf("%8.2f ms", local_conn_time * 1000), "  (CPU)"
     )
     println(
-        "  Boundary conditions: ",
-        @sprintf("%8.2f ms", bc_time * 1000)
+        "  Fine assembly:         ",
+        @sprintf("%8.2f ms", gpu_fine_assembly_time * 1000), "  (GPU)"
     )
     println(
-        "  Coarse solve:        ",
-        @sprintf("%8.2f ms", solve_time * 1000)
-    )
-    println()
-    println("GPU Timings:")
-    println(
-        "  Fine assembly:       ",
-        @sprintf("%8.2f ms", gpu_fine_assembly_time * 1000)
+        "  CG solve (3 RHS):      ",
+        @sprintf("%8.2f ms", gpu_cg_time * 1000), "  (GPU)"
     )
     println(
-        "  Block CG solve:      ",
-        @sprintf("%8.2f ms", gpu_cg_time * 1000)
+        "  Coarse element Ke/fe:  ",
+        @sprintf("%8.2f ms", gpu_coarse_assembly_time * 1000), "  (GPU)"
     )
     println(
-        "  Coarse element RHS:  ",
-        @sprintf("%8.2f ms", gpu_coarse_assembly_time * 1000)
+        "  Coarse scatter:        ",
+        @sprintf("%8.2f ms", assembly_time * 1000), "  (GPU)"
     )
     println(
-        "  Coarse scatter:      ",
-        @sprintf("%8.2f ms", assembly_time * 1000)
+        "  Boundary conditions:   ",
+        @sprintf("%8.2f ms", bc_time * 1000), "  (CPU)"
     )
     println(
-        "  Reconstruction:      ",
-        @sprintf("%8.2f ms", reconstruct_time * 1000)
+        "  Coarse solve:          ",
+        @sprintf("%8.2f ms", solve_time * 1000), "  (CPU)"
+    )
+    println(
+        "  Reconstruction:        ",
+        @sprintf("%8.2f ms", reconstruct_time * 1000), "  (GPU)"
     )
     println()
     println("  " * "-"^68)
@@ -1420,15 +1443,15 @@ function main()
     )
     total_time = cpu_time + gpu_time
     println(
-        "  CPU Total:           ",
+        "  CPU Total:             ",
         @sprintf("%8.2f ms", cpu_time * 1000)
     )
     println(
-        "  GPU Total:           ",
+        "  GPU Total:             ",
         @sprintf("%8.2f ms", gpu_time * 1000)
     )
     println(
-        "  Total:               ",
+        "  Total:                 ",
         @sprintf("%8.2f ms", total_time * 1000)
     )
     println()
