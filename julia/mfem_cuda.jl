@@ -15,6 +15,7 @@
 #
 
 using CUDA
+using CUDA.CUSPARSE
 using Krylov
 using SparseArrays
 using LinearAlgebra
