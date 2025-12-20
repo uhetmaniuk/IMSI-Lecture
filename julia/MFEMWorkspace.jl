@@ -11,12 +11,10 @@ module MFEMWorkspace
 
 using LinearAlgebra
 
-# Load required modules
-include("FEMBase.jl")
-using .FEMBase
-
-include("PCG.jl")
-using .PCG
+# Use FEMBase and PCG modules that are already loaded at the Main level
+# (they must be included before this module is included)
+using Main.FEMBase
+using Main.PCG
 
 export MFEWorkspace
 
