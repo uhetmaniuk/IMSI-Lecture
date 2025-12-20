@@ -55,6 +55,38 @@ end
     return 2.0 * π^2 * sin(π * x) * sin(π * y)
 end
 
+# Helper function to get Ke value with constant tuple indices (GPU-safe)
+@inline function get_Ke_val(Ke, i, j)
+    # Use if-else chain to avoid dynamic tuple indexing
+    idx = (i - 1) * 4 + j
+    if idx == 1; return Ke[1]
+    elseif idx == 2; return Ke[2]
+    elseif idx == 3; return Ke[3]
+    elseif idx == 4; return Ke[4]
+    elseif idx == 5; return Ke[5]
+    elseif idx == 6; return Ke[6]
+    elseif idx == 7; return Ke[7]
+    elseif idx == 8; return Ke[8]
+    elseif idx == 9; return Ke[9]
+    elseif idx == 10; return Ke[10]
+    elseif idx == 11; return Ke[11]
+    elseif idx == 12; return Ke[12]
+    elseif idx == 13; return Ke[13]
+    elseif idx == 14; return Ke[14]
+    elseif idx == 15; return Ke[15]
+    else return Ke[16]
+    end
+end
+
+# Helper function to get node from nodeList tuple (GPU-safe)
+@inline function get_node(nodes, i)
+    if i == 1; return nodes[1]
+    elseif i == 2; return nodes[2]
+    elseif i == 3; return nodes[3]
+    else return nodes[4]
+    end
+end
+
 # Binary search helper for sparse matrix lookups
 @inline function binary_search_sparse(indices, val, start_pos, end_pos)
     left = start_pos
@@ -123,14 +155,18 @@ function assemble_Kii_kernel!(
                 # Gauss quadrature: 2x2 rule
                 gp = 1.0 / sqrt(3.0)
 
-                # Initialize element stiffness and RHS
-                Ke_fine = ntuple(i -> 0.0, 16)  # 4x4 matrix as tuple
-                fe_fine = ntuple(i -> 0.0, 4)   # 4-vector as tuple
+                # Initialize element stiffness and RHS (explicit scalars)
+                Ke11 = 0.0; Ke12 = 0.0; Ke13 = 0.0; Ke14 = 0.0
+                Ke21 = 0.0; Ke22 = 0.0; Ke23 = 0.0; Ke24 = 0.0
+                Ke31 = 0.0; Ke32 = 0.0; Ke33 = 0.0; Ke34 = 0.0
+                Ke41 = 0.0; Ke42 = 0.0; Ke43 = 0.0; Ke44 = 0.0
+                fe1 = 0.0; fe2 = 0.0; fe3 = 0.0; fe4 = 0.0
 
-                # Loop over 4 Gauss points
-                for (qp, (xi, eta)) in enumerate((
-                    (-gp, -gp), (gp, -gp), (gp, gp), (-gp, gp)
-                ))
+                # Loop over 4 Gauss points (unrolled)
+                for qp = 1:4
+                    xi = qp == 1 ? -gp : (qp == 2 ? gp : (qp == 3 ? gp : -gp))
+                    eta = qp <= 2 ? -gp : gp
+
                     # Q1 shape functions at Gauss point
                     N1 = 0.25 * (1.0 - xi) * (1.0 - eta)
                     N2 = 0.25 * (1.0 + xi) * (1.0 - eta)
@@ -138,8 +174,6 @@ function assemble_Kii_kernel!(
                     N4 = 0.25 * (1.0 - xi) * (1.0 + eta)
 
                     # Physical coordinates at Gauss point
-                    # Fine element corners: (x1,y1), (x1+hx,y1),
-                    #                       (x1+hx,y1+hy), (x1,y1+hy)
                     xq = x1 * N1 + (x1 + hx) * N2 + (x1 + hx) * N3 + x1 * N4
                     yq = y1 * N1 + y1 * N2 + (y1 + hy) * N3 + (y1 + hy) * N4
 
@@ -149,69 +183,87 @@ function assemble_Kii_kernel!(
                     f_val = f_func(xq, yq)
 
                     # Q1 shape function gradients in reference coords
-                    dN_dxi = (
-                        -0.25 * (1.0 - eta), 0.25 * (1.0 - eta),
-                        0.25 * (1.0 + eta), -0.25 * (1.0 + eta)
-                    )
-                    dN_deta = (
-                        -0.25 * (1.0 - xi), -0.25 * (1.0 + xi),
-                        0.25 * (1.0 + xi), 0.25 * (1.0 - xi)
-                    )
+                    dN1_dxi = -0.25 * (1.0 - eta)
+                    dN2_dxi =  0.25 * (1.0 - eta)
+                    dN3_dxi =  0.25 * (1.0 + eta)
+                    dN4_dxi = -0.25 * (1.0 + eta)
+
+                    dN1_deta = -0.25 * (1.0 - xi)
+                    dN2_deta = -0.25 * (1.0 + xi)
+                    dN3_deta =  0.25 * (1.0 + xi)
+                    dN4_deta =  0.25 * (1.0 - xi)
 
                     # Physical gradients
-                    dN_dx = ntuple(i -> dN_dxi[i] * invJ11, 4)
-                    dN_dy = ntuple(i -> dN_deta[i] * invJ22, 4)
+                    dN1_dx = dN1_dxi * invJ11; dN1_dy = dN1_deta * invJ22
+                    dN2_dx = dN2_dxi * invJ11; dN2_dy = dN2_deta * invJ22
+                    dN3_dx = dN3_dxi * invJ11; dN3_dy = dN3_deta * invJ22
+                    dN4_dx = dN4_dxi * invJ11; dN4_dy = dN4_deta * invJ22
 
                     # Quadrature weight * detJ (weight = 1 for 2x2 Gauss)
                     w_detJ = detJ
 
-                    # Shape function values at Gauss point
-                    N = (N1, N2, N3, N4)
+                    # Accumulate stiffness (all 16 entries)
+                    Ke11 += (ax_val * dN1_dx * dN1_dx + ay_val * dN1_dy * dN1_dy) * w_detJ
+                    Ke12 += (ax_val * dN1_dx * dN2_dx + ay_val * dN1_dy * dN2_dy) * w_detJ
+                    Ke13 += (ax_val * dN1_dx * dN3_dx + ay_val * dN1_dy * dN3_dy) * w_detJ
+                    Ke14 += (ax_val * dN1_dx * dN4_dx + ay_val * dN1_dy * dN4_dy) * w_detJ
 
-                    # Accumulate stiffness
-                    Ke_fine = ntuple(16) do idx
-                        i = (idx - 1) ÷ 4 + 1
-                        j = (idx - 1) % 4 + 1
-                        Ke_fine[idx] + (
-                            ax_val * dN_dx[i] * dN_dx[j] +
-                            ay_val * dN_dy[i] * dN_dy[j]
-                        ) * w_detJ
-                    end
+                    Ke21 += (ax_val * dN2_dx * dN1_dx + ay_val * dN2_dy * dN1_dy) * w_detJ
+                    Ke22 += (ax_val * dN2_dx * dN2_dx + ay_val * dN2_dy * dN2_dy) * w_detJ
+                    Ke23 += (ax_val * dN2_dx * dN3_dx + ay_val * dN2_dy * dN3_dy) * w_detJ
+                    Ke24 += (ax_val * dN2_dx * dN4_dx + ay_val * dN2_dy * dN4_dy) * w_detJ
 
-                    # Accumulate RHS: fe[i] = ∫ N_i * f dΩ
-                    fe_fine = ntuple(4) do i
-                        fe_fine[i] + N[i] * f_val * w_detJ
-                    end
+                    Ke31 += (ax_val * dN3_dx * dN1_dx + ay_val * dN3_dy * dN1_dy) * w_detJ
+                    Ke32 += (ax_val * dN3_dx * dN2_dx + ay_val * dN3_dy * dN2_dy) * w_detJ
+                    Ke33 += (ax_val * dN3_dx * dN3_dx + ay_val * dN3_dy * dN3_dy) * w_detJ
+                    Ke34 += (ax_val * dN3_dx * dN4_dx + ay_val * dN3_dy * dN4_dy) * w_detJ
+
+                    Ke41 += (ax_val * dN4_dx * dN1_dx + ay_val * dN4_dy * dN1_dy) * w_detJ
+                    Ke42 += (ax_val * dN4_dx * dN2_dx + ay_val * dN4_dy * dN2_dy) * w_detJ
+                    Ke43 += (ax_val * dN4_dx * dN3_dx + ay_val * dN4_dy * dN3_dy) * w_detJ
+                    Ke44 += (ax_val * dN4_dx * dN4_dx + ay_val * dN4_dy * dN4_dy) * w_detJ
+
+                    # Accumulate RHS
+                    fe1 += N1 * f_val * w_detJ
+                    fe2 += N2 * f_val * w_detJ
+                    fe3 += N3 * f_val * w_detJ
+                    fe4 += N4 * f_val * w_detJ
                 end
+
+                # Store Ke in row-major tuple for later access
+                Ke_fine = (Ke11, Ke12, Ke13, Ke14,
+                           Ke21, Ke22, Ke23, Ke24,
+                           Ke31, Ke32, Ke33, Ke34,
+                           Ke41, Ke42, Ke43, Ke44)
 
                 # Fine element node list (local numbering within coarse elem)
-                nodeList = (
-                    ix_fine + iy_fine * (ratio + 1) + 1,
-                    ix_fine + 1 + iy_fine * (ratio + 1) + 1,
-                    ix_fine + 1 + (iy_fine + 1) * (ratio + 1) + 1,
-                    ix_fine + (iy_fine + 1) * (ratio + 1) + 1
-                )
+                node1 = ix_fine + iy_fine * (ratio + 1) + 1
+                node2 = ix_fine + 1 + iy_fine * (ratio + 1) + 1
+                node3 = ix_fine + 1 + (iy_fine + 1) * (ratio + 1) + 1
+                node4 = ix_fine + (iy_fine + 1) * (ratio + 1) + 1
 
-                # Scatter RHS to global d_rhs_fine
+                # Scatter RHS to global d_rhs_fine (explicit to avoid dynamic dispatch)
                 offset_rhs = (iel - 1) * numNodes
-                for i = 1:4
-                    iGlobal = nodeList[i]
-                    rhs_idx = offset_rhs + iGlobal
-                    CUDA.@atomic d_rhs_fine[rhs_idx] += fe_fine[i]
-                end
+                CUDA.@atomic d_rhs_fine[offset_rhs + node1] += fe1
+                CUDA.@atomic d_rhs_fine[offset_rhs + node2] += fe2
+                CUDA.@atomic d_rhs_fine[offset_rhs + node3] += fe3
+                CUDA.@atomic d_rhs_fine[offset_rhs + node4] += fe4
+
+                # Create nodeList tuple for scatter loops
+                nodeList = (node1, node2, node3, node4)
 
                 # Scatter to K_ii and K_b
                 for i = 1:4
-                    iGlobal = nodeList[i]
+                    iGlobal = get_node(nodeList, i)
                     iFree = d_globalToFree[iGlobal]
                     iBoundary = d_globalToBoundary[iGlobal]
 
                     # Scatter to K_ii (only for interior nodes)
                     if iFree != -1
                         for j = 1:4
-                            jGlobal = nodeList[j]
+                            jGlobal = get_node(nodeList, j)
                             jFree = d_globalToFree[jGlobal]
-                            k_val = Ke_fine[(i-1)*4 + j]
+                            k_val = get_Ke_val(Ke_fine, i, j)
 
                             if jFree != -1
                                 # Interior-interior: add to K_ii
@@ -233,15 +285,14 @@ function assemble_Kii_kernel!(
                                 # Offset for this block's btmp
                                 offset_btmp = (iel - 1) * nfree
 
-                                for ir = 1:numVectorsToSolve
-                                    phi_val = d_phi[
-                                        offset_nodes + jGlobal, ir
-                                    ]
-                                    btmp_idx = offset_btmp + iFree
-                                    CUDA.@atomic d_btmp[
-                                        btmp_idx, ir
-                                    ] -= k_val * phi_val
-                                end
+                                # Unroll loop over 3 basis functions
+                                phi_val1 = d_phi[offset_nodes + jGlobal, 1]
+                                phi_val2 = d_phi[offset_nodes + jGlobal, 2]
+                                phi_val3 = d_phi[offset_nodes + jGlobal, 3]
+                                btmp_idx = offset_btmp + iFree
+                                CUDA.@atomic d_btmp[btmp_idx, 1] -= k_val * phi_val1
+                                CUDA.@atomic d_btmp[btmp_idx, 2] -= k_val * phi_val2
+                                CUDA.@atomic d_btmp[btmp_idx, 3] -= k_val * phi_val3
                             end
                         end
                     end
@@ -249,9 +300,9 @@ function assemble_Kii_kernel!(
                     # Scatter to K_b (only for boundary nodes)
                     if iBoundary != -1
                         for j = 1:4
-                            jGlobal = nodeList[j]
+                            jGlobal = get_node(nodeList, j)
                             jGlobal_offset = offset_nodes + jGlobal
-                            k_val = Ke_fine[(i-1)*4 + j]
+                            k_val = get_Ke_val(Ke_fine, i, j)
 
                             # Boundary-all: add to K_b
                             row_start = d_rowptr_b[iBoundary]
