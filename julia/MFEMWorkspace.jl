@@ -54,7 +54,7 @@ struct MFEWorkspace{T<:AbstractFloat, Dim, NNodes}
     utmp_init::Matrix{T}
     utmp::Matrix{T}
 
-    # Coarse element matrices (output of compute_mfem_element!)
+    # Coarse element matrices (computed on GPU)
     Ke_coarse::Matrix{T}
     fe_coarse::Vector{T}
 
