@@ -1170,20 +1170,28 @@ function main()
         b_col = view(d_btmp, :, col)
         x0_col = view(d_utmp, :, col)
 
-        # Debug: check if initial guess is close to solution
+        # Check if initial guess is close to solution
         r0 = b_col - K_ii_gpu * x0_col
         r0_norm = norm(r0)
         b_norm = norm(b_col)
+        rel_residual = r0_norm / max(b_norm, 1e-16)
         println("  RHS $col: ||r0|| = ", @sprintf("%.2e", r0_norm),
                 ", ||b|| = ", @sprintf("%.2e", b_norm),
-                ", relative = ", @sprintf("%.2e", r0_norm / max(b_norm, 1e-16)))
+                ", relative = ", @sprintf("%.2e", rel_residual))
 
-        # Use cg! with warm-start: pass x0_col as 4th argument
-        cg!(solver, K_ii_gpu, b_col, x0_col;
-            atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
-        copyto!(view(d_utmp, :, col), solver.x)
-        total_iters += solver.stats.niter
-        all_converged = all_converged && solver.stats.solved
+        # Skip CG if initial guess is already converged
+        if rel_residual < 1e-12
+            # Already converged - no iterations needed
+            # Solution is already in x0_col (d_utmp), no copy needed
+            total_iters += 0
+        else
+            # Need to solve - use cg! with warm-start
+            solver = cg!(solver, K_ii_gpu, b_col, x0_col;
+                atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
+            copyto!(view(d_utmp, :, col), solver.x)
+            total_iters += solver.stats.niter
+            all_converged = all_converged && solver.stats.solved
+        end
     end
     gpu_cg_time = time() - t0
 
