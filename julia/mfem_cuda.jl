@@ -1162,6 +1162,15 @@ function main()
     for col = 1:size(d_btmp, 2)
         b_col = view(d_btmp, :, col)
         x0_col = view(d_utmp, :, col)
+
+        # Debug: check if initial guess is close to solution
+        r0 = b_col - K_ii_gpu * x0_col
+        r0_norm = norm(r0)
+        b_norm = norm(b_col)
+        println("  RHS $col: ||r0|| = ", @sprintf("%.2e", r0_norm),
+                ", ||b|| = ", @sprintf("%.2e", b_norm),
+                ", relative = ", @sprintf("%.2e", r0_norm / max(b_norm, 1e-16)))
+
         x_col, stats = cg(K_ii_gpu, b_col, x0_col;
                           atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
         copyto!(view(d_utmp, :, col), x_col)
