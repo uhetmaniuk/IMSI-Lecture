@@ -18,7 +18,6 @@ using CUDA
 using CUDA.CUSPARSE
 using Krylov
 import Krylov: CgWorkspace, cg!
-using KrylovPreconditioners
 using SparseArrays
 using LinearAlgebra
 using Printf
@@ -102,6 +101,23 @@ end
     elseif i == 3; return nodes[3]
     else return nodes[4]
     end
+end
+
+# CUDA kernel to extract diagonal elements from CSC sparse matrix
+function extract_diagonal_kernel!(d_diag, d_colptr, d_rowidx, d_nzval, n)
+    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    if i <= n
+        # Search for diagonal entry in column i
+        @inbounds col_start = d_colptr[i]
+        @inbounds col_end = d_colptr[i + 1] - 1
+        for k = col_start:col_end
+            @inbounds if d_rowidx[k] == i
+                @inbounds d_diag[i] = d_nzval[k]
+                break
+            end
+        end
+    end
+    return nothing
 end
 
 # Binary search helper for sparse matrix lookups
@@ -970,11 +986,20 @@ function main()
         d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, (nfree_w, nfree_w)
     )
     d_btmp_w .= 1.0
+    # Warm-up extract_diagonal_kernel
+    d_diag_w = CUDA.zeros(Float64, nfree_w)
+    @cuda threads=64 blocks=cld(nfree_w, 64) extract_diagonal_kernel!(
+        d_diag_w, d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, nfree_w
+    )
+    CUDA.synchronize()
+    # Build Jacobi preconditioner for warm-up
+    d_precond_w = map(d -> d ≠ 0 ? 1 / abs(d) : 1.0, d_diag_w)
+    precond_w = Diagonal(d_precond_w)
     # Use regular CG for each RHS column (warm-up)
     for col = 1:size(d_btmp_w, 2)
         x_col = view(d_utmp_w, :, col)
         b_col = view(d_btmp_w, :, col)
-        cg(K_warmup, b_col; atol=1e-6, rtol=1e-6, itmax=5, verbose=0)
+        cg(K_warmup, b_col; M=precond_w, atol=1e-6, rtol=1e-6, itmax=5, verbose=0)
     end
     CUDA.synchronize()
 
@@ -1179,12 +1204,19 @@ function main()
         d_colptr_ii, d_rowidx_ii, d_valK_ii, (n_total, n_total)
     )
 
-    # Build block Jacobi preconditioner for the block-diagonal K_ii
-    # Each block has size nfree x nfree, and there are nb blocks
-    println("Building block Jacobi preconditioner...")
+    # Build diagonal Jacobi preconditioner for K_ii
+    # P⁻¹ = diag(1/|K[i,i]|)
+    println("Building diagonal Jacobi preconditioner...")
     t0_prec = time()
-    # BlockJacobiPreconditioner extracts and factorizes blocks during construction
-    precond = BlockJacobiPreconditioner(K_ii_gpu, nb, CUDABackend())
+    # Extract diagonal from sparse matrix on GPU
+    d_diag = CUDA.zeros(Float64, n_total)
+    @cuda threads=256 blocks=cld(n_total, 256) extract_diagonal_kernel!(
+        d_diag, d_colptr_ii, d_rowidx_ii, d_valK_ii, n_total
+    )
+    CUDA.synchronize()
+    # Build preconditioner: P⁻¹[i] = 1/|diag[i]| (or 1 if zero)
+    d_precond = map(d -> d ≠ 0 ? 1 / abs(d) : 1.0, d_diag)
+    precond = Diagonal(d_precond)
     prec_time = time() - t0_prec
     println("  Preconditioner build time: ", @sprintf("%.2f ms", prec_time * 1000))
 
