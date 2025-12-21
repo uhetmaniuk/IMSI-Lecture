@@ -1270,6 +1270,9 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
   // Capture member variable for device lambda (avoid implicit 'this' capture)
   auto phiMFEM_local = phiMFEM_d;
 
+  // Time the parallel reconstruction
+  Kokkos::Timer timer;
+
   // Parallel reconstruction over coarse elements on device
   Kokkos::parallel_for(
       "MFEM_Reconstruction",
@@ -1302,16 +1305,25 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::OutputMFEMFine(
         }
       });
   Kokkos::fence();
+  double computeTime = timer.seconds();
 
   // Copy result back to host for file output
+  timer.reset();
   auto uFine_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), uFine_d);
+  double copyTime = timer.seconds();
 
   // Write to file (use '\n' instead of std::endl to avoid flushing on each line)
+  timer.reset();
   std::ofstream outFine("outputFine.txt");
   for (int i = 0; i < numFineNodes; ++i) {
     outFine << uFine_h(i) << '\n';
   }
   outFine.close();
+  double ioTime = timer.seconds();
+
+  std::cout << "    Compute time:    " << computeTime * 1000.0 << " ms\n";
+  std::cout << "    D2H copy time:   " << copyTime * 1000.0 << " ms\n";
+  std::cout << "    File I/O time:   " << ioTime * 1000.0 << " ms\n";
 }
 
 }  // namespace IMSI
