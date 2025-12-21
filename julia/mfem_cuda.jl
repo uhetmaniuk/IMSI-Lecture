@@ -103,19 +103,22 @@ end
     end
 end
 
-# CUDA kernel to extract diagonal elements from CSC sparse matrix
-function extract_diagonal_kernel!(d_diag, d_colptr, d_rowidx, d_nzval, n)
+# CUDA kernel to build Jacobi preconditioner: extract diagonal and compute 1/|diag|
+function build_jacobi_precond_kernel!(d_precond, d_colptr, d_rowidx, d_nzval, n)
     i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     if i <= n
+        diag_val = 0.0
         # Search for diagonal entry in column i
         @inbounds col_start = d_colptr[i]
         @inbounds col_end = d_colptr[i + 1] - 1
         for k = col_start:col_end
             @inbounds if d_rowidx[k] == i
-                @inbounds d_diag[i] = d_nzval[k]
+                diag_val = d_nzval[k]
                 break
             end
         end
+        # Compute preconditioner value: 1/|diag| or 1 if zero
+        @inbounds d_precond[i] = diag_val ≠ 0 ? 1 / abs(diag_val) : 1.0
     end
     return nothing
 end
@@ -620,16 +623,21 @@ function assemble_coarse_color_kernel!(
     return nothing
 end
 
-# CUDA kernel to compute coarse element RHS and stiffness:
+# CUDA kernel to compute coarse element RHS and stiffness (FUSED version):
+# This kernel fuses transfer_utmp_to_phi and compute_fe_Ke_coarse into one.
+# 1. Loads/computes ALL phi values into shared memory:
+#    - Boundary nodes: from d_phiLocal (Q1 interpolation, same for all elements)
+#    - Interior nodes: from d_utmp (CG solution), plus partition of unity for phi_4
+# 2. Writes d_phi to global memory (for reconstruction kernel)
+# 3. Computes fe_coarse and Ke_coarse using cached phi values
+#
 # fe_coarse[iel, ir] = phi[iel, :, ir]' * rhs_fine[iel, :]
 # Ke_coarse[iel, ir, jr] = phi[iel, :, ir]' * K_b[iel, :, :] * phi[iel, :, jr]
-# Uses shared memory reduction for efficiency and to minimize atomic
-# contention. Optimized version caches phi values for boundary nodes
-# in shared memory to reduce global memory traffic.
-function compute_fe_Ke_coarse_kernel!(
-    d_fe_coarse, d_Ke_coarse, d_phi, d_rhs_fine,
-    d_valK_b, d_rowptr_b, d_colidx_b, d_boundaryToGlobal,
-    nb, numNodes, numVectors, nboundary, nnz_b
+function compute_fe_Ke_coarse_fused_kernel!(
+    d_fe_coarse, d_Ke_coarse, d_phi, d_utmp, d_phiLocal, d_rhs_fine,
+    d_valK_b, d_rowptr_b, d_colidx_b,
+    d_boundaryToGlobal, d_freeToGlobal, d_globalToFree,
+    nb, numNodes, numVectors, nboundary, nfree, nnz_b
 )
     # Each block handles one coarse element
     iel = blockIdx().x
@@ -641,21 +649,22 @@ function compute_fe_Ke_coarse_kernel!(
 
     # Offsets for this element's data
     offset_nodes = (iel - 1) * numNodes
+    offset_utmp = (iel - 1) * nfree
 
     # Shared memory layout (all offsets in Float64 elements):
+    # - sdata_phi: numNodes * numVectors for ALL phi values
     # - sdata_fe: blockDim().x * numVectors for fe_coarse reduction
     # - sdata_Ke: blockDim().x * 16 for Ke_coarse local accumulation
-    # - sdata_phi_boundary: nboundary * numVectors for boundary phi cache
-    sdata_fe = @cuDynamicSharedMem(Float64, blockDim().x * numVectors)
-    offset_Ke = blockDim().x * numVectors
+    sdata_phi = @cuDynamicSharedMem(Float64, numNodes * numVectors)
+    offset_fe = numNodes * numVectors
+    sdata_fe = @cuDynamicSharedMem(
+        Float64, blockDim().x * numVectors,
+        offset_fe * sizeof(Float64)
+    )
+    offset_Ke = offset_fe + blockDim().x * numVectors
     sdata_Ke = @cuDynamicSharedMem(
         Float64, blockDim().x * 16,
         offset_Ke * sizeof(Float64)
-    )
-    offset_phi = offset_Ke + blockDim().x * 16
-    sdata_phi_boundary = @cuDynamicSharedMem(
-        Float64, nboundary * numVectors,
-        offset_phi * sizeof(Float64)
     )
 
     # Initialize Ke_coarse local accumulator
@@ -664,33 +673,58 @@ function compute_fe_Ke_coarse_kernel!(
     end
 
     # ====================================================================
-    # Load phi values for boundary nodes into shared memory
+    # Load/compute ALL phi values into shared memory
     # ====================================================================
-    # Layout: sdata_phi_boundary[(ib-1)*numVectors + ir] = phi[boundary_node_ib, ir]
-    # This avoids repeated global memory reads in the Ke computation
-    total_phi_entries = nboundary * numVectors
-    for idx = tid:blockDim().x:total_phi_entries
-        ib = (idx - 1) ÷ numVectors + 1   # Boundary node index (1 to nboundary)
-        ir = (idx - 1) % numVectors + 1   # Basis function index (1 to numVectors)
-        @inbounds iGlobal = d_boundaryToGlobal[ib]
-        @inbounds sdata_phi_boundary[idx] = d_phi[offset_nodes + iGlobal, ir]
+    # Each thread handles multiple nodes in a strided loop
+    for i_node = tid:blockDim().x:numNodes
+        # Check if this node is interior or boundary
+        @inbounds iFree = d_globalToFree[i_node]
+
+        if iFree != -1
+            # Interior node: load from d_utmp, compute phi_4 from partition of unity
+            phi1 = @inbounds d_utmp[offset_utmp + iFree, 1]
+            phi2 = @inbounds d_utmp[offset_utmp + iFree, 2]
+            phi3 = @inbounds d_utmp[offset_utmp + iFree, 3]
+            phi4 = 1.0 - phi1 - phi2 - phi3
+
+            # Store in shared memory
+            base_idx = (i_node - 1) * numVectors
+            @inbounds sdata_phi[base_idx + 1] = phi1
+            @inbounds sdata_phi[base_idx + 2] = phi2
+            @inbounds sdata_phi[base_idx + 3] = phi3
+            @inbounds sdata_phi[base_idx + 4] = phi4
+
+            # Also write to d_phi for later use by reconstruction kernel
+            @inbounds d_phi[offset_nodes + i_node, 1] = phi1
+            @inbounds d_phi[offset_nodes + i_node, 2] = phi2
+            @inbounds d_phi[offset_nodes + i_node, 3] = phi3
+            @inbounds d_phi[offset_nodes + i_node, 4] = phi4
+        else
+            # Boundary node: copy from d_phiLocal (same for all elements)
+            base_idx = (i_node - 1) * numVectors
+            for ir = 1:numVectors
+                @inbounds phi_val = d_phiLocal[i_node, ir]
+                @inbounds sdata_phi[base_idx + ir] = phi_val
+            end
+            # Note: d_phi already has boundary values from initialization
+        end
     end
 
     sync_threads()
 
     # ====================================================================
-    # Part 1: Compute fe_coarse using reduction
+    # Part 1: Compute fe_coarse using reduction (uses cached sdata_phi)
     # ====================================================================
 
     # Each thread computes partial sums for all 4 basis functions
     for ir = 1:numVectors
         local_sum = 0.0
-        # Stride loop: each thread processes multiple nodes if
-        # numNodes > blockDim().x
+        # Stride loop: each thread processes multiple nodes
         i = tid
         while i <= numNodes
+            base_idx = (i - 1) * numVectors
             @inbounds local_sum += (
-                d_phi[offset_nodes + i, ir] *
+                sdata_phi[base_idx + ir] *
                 d_rhs_fine[offset_nodes + i]
             )
             i += blockDim().x
@@ -724,7 +758,7 @@ function compute_fe_Ke_coarse_kernel!(
     sync_threads()
 
     # ====================================================================
-    # Part 2: Compute Ke_coarse = phi^T * K_b * phi (local accumulation)
+    # Part 2: Compute Ke_coarse = phi^T * K_b * phi (uses cached sdata_phi)
     # ====================================================================
 
     # Parallelize over boundary rows: each thread handles some rows
@@ -735,42 +769,40 @@ function compute_fe_Ke_coarse_kernel!(
 
     for iBoundary_local = tid:blockDim().x:nboundary
         if iBoundary_local <= nboundary
+            # Get local node index for this boundary node
+            @inbounds iGlobal = d_boundaryToGlobal[iBoundary_local]
+            base_idx_i = (iGlobal - 1) * numVectors
+
             # Global boundary index for rowptr lookup
             iBoundary_global = block_offset_boundary + iBoundary_local
 
-            # Row range in K_b for this boundary node (using global index)
+            # Row range in K_b for this boundary node
             @inbounds row_start = d_rowptr_b[iBoundary_global]
             @inbounds row_end = d_rowptr_b[iBoundary_global + 1] - 1
 
             # Iterate over non-zeros in this row
             for k_pos = row_start:row_end
-                # k_pos is already global, no offset needed
                 @inbounds jGlobal_offset = d_colidx_b[k_pos]
                 @inbounds k_val = d_valK_b[k_pos]
 
                 # Convert global offset to local node index
                 jGlobal = jGlobal_offset - offset_nodes
+                base_idx_j = (jGlobal - 1) * numVectors
 
-                # Accumulate contribution to Ke_coarse for all basis
-                # function pairs. Store in thread-local shared memory
-                # (NO atomics here!)
+                # Accumulate contribution to Ke_coarse for all basis pairs
+                # Read phi values from shared memory (NO global memory access!)
                 for ir = 1:numVectors
-                    # Read phi_i from shared memory (cached boundary values)
-                    phi_idx_i = (iBoundary_local - 1) * numVectors + ir
-                    @inbounds phi_i = sdata_phi_boundary[phi_idx_i]
+                    @inbounds phi_i = sdata_phi[base_idx_i + ir]
                     phi_i_k = phi_i * k_val
 
                     for jr = 1:numVectors
-                        # Read phi_j from global memory (jGlobal can be any node)
-                        @inbounds phi_j = d_phi[offset_nodes + jGlobal, jr]
+                        @inbounds phi_j = sdata_phi[base_idx_j + jr]
                         contribution = phi_i_k * phi_j
 
                         # Linear index into local Ke_coarse (4x4 = 16 elems)
                         ke_idx = (ir - 1) * numVectors + jr
                         # Accumulate in shared memory (thread-private)
-                        @inbounds sdata_Ke[(tid - 1) * 16 + ke_idx] += (
-                            contribution
-                        )
+                        @inbounds sdata_Ke[(tid - 1) * 16 + ke_idx] += contribution
                     end
                 end
             end
@@ -780,8 +812,6 @@ function compute_fe_Ke_coarse_kernel!(
     sync_threads()
 
     # Final reduction: sum all thread-local Ke_coarse contributions
-    # Only use atomics at the very end (16 atomics per thread instead
-    # of thousands!)
     for i = 1:16
         local_val = sdata_Ke[(tid - 1) * 16 + i]
         if local_val != 0.0
@@ -821,6 +851,11 @@ function main()
         "$(ratio)x$(ratio) fine elements)"
     )
     println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
+    if USE_VARYING_COEFFICIENTS
+        println("Diffusion coefficients: VARYING (1 + 0.5*sin/cos terms)")
+    else
+        println("Diffusion coefficients: CONSTANT (ax=ay=1)")
+    end
     println()
 
     t0 = time()
@@ -986,14 +1021,12 @@ function main()
         d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, (nfree_w, nfree_w)
     )
     d_btmp_w .= 1.0
-    # Warm-up extract_diagonal_kernel
-    d_diag_w = CUDA.zeros(Float64, nfree_w)
-    @cuda threads=64 blocks=cld(nfree_w, 64) extract_diagonal_kernel!(
-        d_diag_w, d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, nfree_w
+    # Warm-up build_jacobi_precond_kernel (fused diagonal extraction + inversion)
+    d_precond_w = CUDA.zeros(Float64, nfree_w)
+    @cuda threads=64 blocks=cld(nfree_w, 64) build_jacobi_precond_kernel!(
+        d_precond_w, d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, nfree_w
     )
     CUDA.synchronize()
-    # Build Jacobi preconditioner for warm-up
-    d_precond_w = map(d -> d ≠ 0 ? 1 / abs(d) : 1.0, d_diag_w)
     precond_w = Diagonal(d_precond_w)
     # Use regular CG for each RHS column (warm-up)
     for col = 1:size(d_btmp_w, 2)
@@ -1003,31 +1036,23 @@ function main()
     end
     CUDA.synchronize()
 
-    # Warm-up kernel 6: transfer_utmp_to_phi
-    @cuda threads=64 blocks=cld(nb_warmup * nfree_w, 64) (
-        transfer_utmp_to_phi_kernel!(
-            d_phi_w, d_utmp_w, d_freeToGlobal_w,
-            nb_warmup, nfree_w, numNodes_warmup, 3
-        )
-    )
-    CUDA.synchronize()
-
-    # Warm-up kernel 7: compute_fe_Ke_coarse
+    # Warm-up kernel 6: compute_fe_Ke_coarse_fused (replaces transfer_utmp_to_phi + compute_fe_Ke_coarse)
     d_fe_coarse_w = CUDA.zeros(Float64, nb_warmup, 4)
     d_Ke_coarse_w = CUDA.zeros(Float64, nb_warmup, 16)
-    # Shared memory: fe (32*4) + Ke (32*16) + phi_boundary (nboundary_w*4)
-    shared_mem_w = (32 * (4 + 16) + nboundary_w * 4) * sizeof(Float64)
+    d_globalToFree_w = cu(workspace_warmup.globalToFree)
+    # Shared memory: phi (numNodes*4) + fe (32*4) + Ke (32*16)
+    shared_mem_w = (numNodes_warmup * 4 + 32 * (4 + 16)) * sizeof(Float64)
     @cuda threads=32 blocks=1 shmem=shared_mem_w (
-        compute_fe_Ke_coarse_kernel!(
-            d_fe_coarse_w, d_Ke_coarse_w, d_phi_w, d_rhs_fine_w,
-            d_valK_b_w, d_rowptr_b_w, d_colidx_b_w,
-            d_boundaryToGlobal_w, nb_warmup, numNodes_warmup, 4,
-            nboundary_w, nnz_b_w
+        compute_fe_Ke_coarse_fused_kernel!(
+            d_fe_coarse_w, d_Ke_coarse_w, d_phi_w, d_utmp_w, d_phiLocal_w,
+            d_rhs_fine_w, d_valK_b_w, d_rowptr_b_w, d_colidx_b_w,
+            d_boundaryToGlobal_w, d_freeToGlobal_w, d_globalToFree_w,
+            nb_warmup, numNodes_warmup, 4, nboundary_w, nfree_w, nnz_b_w
         )
     )
     CUDA.synchronize()
 
-    # Warm-up kernel 8: reconstruct_fine_solution
+    # Warm-up kernel 7: reconstruct_fine_solution
     d_coarse_sol_w = CUDA.zeros(Float64, 4)
     d_cell_to_node_w = cu(reshape([1, 2, 4, 3], 1, 4))
     d_fine_x_w = CUDA.zeros(Float64, 25)
@@ -1039,7 +1064,7 @@ function main()
     )
     CUDA.synchronize()
 
-    # Warm-up kernel 9: assemble_coarse_color (new!)
+    # Warm-up kernel 8: assemble_coarse_color
     d_mat_values_w = CUDA.zeros(Float64, 16)
     d_rhs_w = CUDA.zeros(Float64, 4)
     d_col_ptr_w = cu(Int32[1, 5, 9, 13, 17])  # 4 nodes, 4 nnz per node
@@ -1059,7 +1084,7 @@ function main()
         "  GPU warm-up time: ",
         @sprintf("%.2f ms", warmup_time_gpu * 1000)
     )
-    println("  (All 9 CUDA kernels and block CG solver now compiled)")
+    println("  (All 8 CUDA kernels and CG solver now compiled)")
     println()
 
     workspace = MFEWorkspace{Float64, 2, 4}(ratio)
@@ -1208,14 +1233,12 @@ function main()
     # P⁻¹ = diag(1/|K[i,i]|)
     println("Building diagonal Jacobi preconditioner...")
     t0_prec = time()
-    # Extract diagonal from sparse matrix on GPU
-    d_diag = CUDA.zeros(Float64, n_total)
-    @cuda threads=256 blocks=cld(n_total, 256) extract_diagonal_kernel!(
-        d_diag, d_colptr_ii, d_rowidx_ii, d_valK_ii, n_total
+    # Fused kernel: extract diagonal and compute 1/|diag| in one pass
+    d_precond = CUDA.zeros(Float64, n_total)
+    @cuda threads=256 blocks=cld(n_total, 256) build_jacobi_precond_kernel!(
+        d_precond, d_colptr_ii, d_rowidx_ii, d_valK_ii, n_total
     )
     CUDA.synchronize()
-    # Build preconditioner: P⁻¹[i] = 1/|diag[i]| (or 1 if zero)
-    d_precond = map(d -> d ≠ 0 ? 1 / abs(d) : 1.0, d_diag)
     precond = Diagonal(d_precond)
     prec_time = time() - t0_prec
     println("  Preconditioner build time: ", @sprintf("%.2f ms", prec_time * 1000))
@@ -1265,44 +1288,37 @@ function main()
     println("  GPU CG time: ", @sprintf("%.2f ms", gpu_cg_time * 1000))
     println()
 
-    # Transfer solution from d_utmp back to d_phi
-    threads_per_block = 256
-    num_blocks = cld(nb * nfree, threads_per_block)
-    @cuda threads=threads_per_block blocks=num_blocks (
-        transfer_utmp_to_phi_kernel!(
-            d_phi, d_utmp, d_freeToGlobal, nb, nfree, numNodes,
-            numVectorsToSolve
-        )
-    )
-    CUDA.synchronize()
-
-    # Compute coarse element RHS and stiffness matrices
+    # Compute coarse element RHS and stiffness matrices (FUSED kernel)
+    # This also transfers d_utmp to d_phi for the reconstruction kernel
     # fe_coarse[iel, ir] = phi[iel, :, ir]' * rhs_fine[iel, :]
     # Ke_coarse[iel, ir*4+jr] = phi[iel, :, ir]' * K_b * phi[iel, :, jr]
-    println("GPU coarse element assembly...")
+    println("GPU coarse element assembly (fused)...")
     t0 = time()
     numVectors = 4
     d_fe_coarse = CUDA.zeros(Float64, nb, numVectors)
     d_Ke_coarse = CUDA.zeros(Float64, nb, numVectors * numVectors)
 
-    # Upload boundaryToGlobal mapping to device
+    # Upload mappings to device
     d_boundaryToGlobal = cu(workspace.boundaryToGlobal)
+    d_globalToFree = cu(workspace.globalToFree)
 
     threads_per_block = 128  # Use 128 threads for better occupancy
     num_blocks = nb  # One block per coarse element
-    # Shared memory layout:
-    # - fe_coarse reduction: threads * numVectors
-    # - Ke_coarse local accumulation: threads * 16
-    # - phi boundary cache: nboundary * numVectors (NEW)
+    # Shared memory layout (FUSED kernel caches ALL phi values):
+    # - sdata_phi: numNodes * numVectors (all phi values)
+    # - sdata_fe: threads * numVectors (fe_coarse reduction)
+    # - sdata_Ke: threads * 16 (Ke_coarse local accumulation)
     shared_mem_size = (
-        threads_per_block * (numVectors + 16) + nboundary * numVectors
+        numNodes * numVectors +
+        threads_per_block * (numVectors + 16)
     ) * sizeof(Float64)
 
     @cuda threads=threads_per_block blocks=num_blocks shmem=shared_mem_size (
-        compute_fe_Ke_coarse_kernel!(
-            d_fe_coarse, d_Ke_coarse, d_phi, d_rhs_fine, d_valK_b,
-            d_rowptr_b, d_colidx_b, d_boundaryToGlobal, nb, numNodes,
-            numVectors, nboundary, nnz_b
+        compute_fe_Ke_coarse_fused_kernel!(
+            d_fe_coarse, d_Ke_coarse, d_phi, d_utmp, d_phiLocal, d_rhs_fine,
+            d_valK_b, d_rowptr_b, d_colidx_b,
+            d_boundaryToGlobal, d_freeToGlobal, d_globalToFree,
+            nb, numNodes, numVectors, nboundary, nfree, nnz_b
         )
     )
     CUDA.synchronize()
@@ -1503,7 +1519,7 @@ function main()
         @sprintf("%8.2f ms", gpu_cg_time * 1000), "  (GPU)"
     )
     println(
-        "  Coarse element Ke/fe:  ",
+        "  Coarse Ke/fe (fused):  ",
         @sprintf("%8.2f ms", gpu_coarse_assembly_time * 1000), "  (GPU)"
     )
     println(
