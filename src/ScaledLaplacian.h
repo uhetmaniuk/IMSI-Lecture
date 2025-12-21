@@ -836,6 +836,18 @@ struct MFEMAssemblyFunctor
         printf("numFreeDofs = %d\n", numFreeDofs);
         printf("actualNnz_ii = %d\n", matRowPtr_ii(numFreeDofs));
 
+        // Check row pointers
+        printf("\nFirst 5 row pointers:\n");
+        for (int i = 0; i <= 5; ++i) {
+          printf("  rowPtr[%d] = %d\n", i, matRowPtr_ii(i));
+        }
+
+        // Check last few row pointers
+        printf("Last 3 row pointers:\n");
+        for (int i = numFreeDofs - 2; i <= numFreeDofs; ++i) {
+          printf("  rowPtr[%d] = %d\n", i, matRowPtr_ii(i));
+        }
+
         // Print first few diagonal values
         printf("\nFirst 5 diagonal values:\n");
         for (int i = 0; i < 5 && i < numFreeDofs; ++i) {
