@@ -57,6 +57,7 @@ int main(int argc, char* argv[])
     int nx = 256;
     int ny = 256;
     IMSI::ElementType elementType = IMSI::ElementType::Q1;
+    bool writeOutput = false;
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
@@ -69,6 +70,8 @@ int main(int argc, char* argv[])
         elementType = IMSI::ElementType::Q1;
       } else if (arg == "-mfem") {
         elementType = IMSI::ElementType::MFEM_L;
+      } else if (arg == "-output" || arg == "--output") {
+        writeOutput = true;
       } else if (arg == "-h" || arg == "--help") {
         std::cout << "\nUsage: " << argv[0] << " [options]" << std::endl;
         std::cout << "Options:" << std::endl;
@@ -76,12 +79,20 @@ int main(int argc, char* argv[])
         std::cout << "  -ny <n>    Number of elements in y direction (default: 256)" << std::endl;
         std::cout << "  -q1        Use Q1 (bilinear) elements (default)" << std::endl;
         std::cout << "  -mfem      Use MFEM_L (multiscale) elements" << std::endl;
+        std::cout << "  -output    Write solution files (default: off)" << std::endl;
         std::cout << "  -h, --help Show this help message" << std::endl;
-        std::cout << "\nExample: " << argv[0] << " -nx 16 -ny 16 -q1" << std::endl;
+        std::cout << "\nExample: " << argv[0] << " -nx 16 -ny 16 -mfem -output" << std::endl;
         Kokkos::finalize();
         return 0;
       }
     }
+
+    // Print coefficient type
+#if IMSI_COEFF == 1
+    std::cout << "\nCoefficients: CONSTANT (Laplace equation)" << std::endl;
+#elif IMSI_COEFF == 2
+    std::cout << "\nCoefficients: VARYING (oscillatory problem)" << std::endl;
+#endif
 
     // ========================================================================
     // Problem setup
@@ -239,28 +250,30 @@ int main(int argc, char* argv[])
     // Output results
     // ========================================================================
 
-    std::cout << "\nWriting solution to file..." << std::endl;
-
     std::vector<Scalar> fullSolution(numNodes, 0.0);
     for (size_t i = 0; i < numFreeDofs; ++i) {
       fullSolution[freeToGlobal[i]] = solution[i];
     }
 
     double reconstructTime = 0.0;
-    if (elementType == IMSI::ElementType::MFEM_L) {
-      OutputToGMSH("openmp_coarse_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
-      std::cout << "  Coarse solution written to: openmp_coarse_solution.msh" << std::endl;
+    if (writeOutput) {
+      std::cout << "\nWriting solution to file..." << std::endl;
 
-      // Reconstruct fine-scale solution
-      std::cout << "\nReconstructing fine-scale solution..." << std::endl;
-      timer.reset();
-      scalarLap.OutputMFEMFine(fullSolution.data(), nx, ny);
-      reconstructTime = timer.seconds();
-      std::cout << "  Fine-scale reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
-      std::cout << "  Fine solution written to: outputFine.txt" << std::endl;
-    } else {
-      OutputToGMSH("openmp_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
-      std::cout << "  Solution written to: openmp_solution.msh" << std::endl;
+      if (elementType == IMSI::ElementType::MFEM_L) {
+        OutputToGMSH("openmp_coarse_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+        std::cout << "  Coarse solution written to: openmp_coarse_solution.msh" << std::endl;
+
+        // Reconstruct fine-scale solution
+        std::cout << "\nReconstructing fine-scale solution..." << std::endl;
+        timer.reset();
+        scalarLap.OutputMFEMFine(fullSolution.data(), nx, ny);
+        reconstructTime = timer.seconds();
+        std::cout << "  Fine-scale reconstruction time: " << reconstructTime * 1000.0 << " ms" << std::endl;
+        std::cout << "  Fine solution written to: outputFine.txt" << std::endl;
+      } else {
+        OutputToGMSH("openmp_solution.msh", mesh, fullSolution.data(), int(fullSolution.size()));
+        std::cout << "  Solution written to: openmp_solution.msh" << std::endl;
+      }
     }
 
     // ========================================================================
