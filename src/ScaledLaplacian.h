@@ -847,33 +847,29 @@ struct MFEMAssemblyFunctor
     });
     teamMember.team_barrier();
 
-    // Solve for each of the first 3 basis functions using PCG-SSOR
-    // PCG solver is serial, so use Kokkos::single
-    double const omega         = 1.0;    // SSOR relaxation parameter
-    int const    numSSORSweeps = 1;      // Number of SSOR sweeps per preconditioner application
-    double const tol           = 1e-12;  // Convergence tolerance
-    int const    maxIter       = 1000;   // Maximum PCG iterations
+    // Solve for each of the first 3 basis functions using team-parallel PCG
+    // All threads in the team participate in SpMV, dot products, and vector updates
+    double const tol     = 1e-10;  // Convergence tolerance (relaxed slightly for GPU)
+    int const    maxIter = 500;    // Maximum PCG iterations
 
-    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
-      for (int ir = 0; ir < numVectorsToSolve; ++ir) {
-        int iter = PCG_Solve_SSOR_Precond(
-            numFreeDofs,
-            &matRowPtr_ii(0),
-            &matColIdx_ii(0),
-            &matValues_ii(0),
-            &diagValues_ii(0),
-            &btmp(ir * numFreeDofs),  // RHS
-            &utmp(ir * numFreeDofs),  // Solution (initialized with Q1 basis)
-            &pcg_work(0),             // Workspace
-            omega,
-            numSSORSweeps,
-            tol,
-            maxIter);
-        // Optional: could track convergence, but for now we proceed
-        // In production code, check if iter == -1 (failure) or iter > maxIter (slow convergence)
-      }
-    });
-    teamMember.team_barrier();
+    for (int ir = 0; ir < numVectorsToSolve; ++ir) {
+      // Team-parallel PCG with Jacobi preconditioning
+      // All threads participate - no Kokkos::single needed
+      PCG_Solve_Team(
+          teamMember,
+          numFreeDofs,
+          &matRowPtr_ii(0),
+          &matColIdx_ii(0),
+          &matValues_ii(0),
+          &diagValues_ii(0),          // Diagonal for Jacobi preconditioner
+          &btmp(ir * numFreeDofs),    // RHS
+          &utmp(ir * numFreeDofs),    // Solution (initialized with Q1 basis)
+          &pcg_work(0),               // Workspace (size 4*numFreeDofs)
+          tol,
+          maxIter);
+      // Barrier after each solve to ensure completion before next
+      teamMember.team_barrier();
+    }
 
     // Reconstruct full basis functions by combining boundary (phi) and interior (utmp) values
     // Phi was initialized with boundary basis functions; now add interior solution

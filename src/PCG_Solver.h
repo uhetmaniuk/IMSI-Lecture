@@ -530,6 +530,142 @@ PCG_Solve_SSOR_Precond(
   return (iter == maxIter) ? -1 : iter + 1;
 }
 
+/**
+ * @brief Team-parallel PCG solver with Jacobi preconditioning for Kokkos teams
+ *
+ * This version parallelizes all PCG operations within a Kokkos team using TeamThreadRange.
+ * Designed for GPU execution where each team solves one linear system.
+ *
+ * All team members participate in:
+ * - SpMV (sparse matrix-vector product)
+ * - Dot products (parallel reductions)
+ * - Vector updates (AXPY operations)
+ *
+ * @tparam TeamMember Kokkos team member type
+ * @param team The team member handle
+ * @param n Matrix dimension
+ * @param rowPtr CSR row pointers (size n+1)
+ * @param colInd CSR column indices
+ * @param values CSR values
+ * @param diag Diagonal elements for Jacobi preconditioning (size n)
+ * @param rhs Right-hand side (size n)
+ * @param sol Solution vector (size n) - input: initial guess, output: solution
+ * @param work Workspace array (size 4*n): partitioned as [r, z, p, Ap]
+ * @param tol Convergence tolerance for ||r||_2
+ * @param maxIter Maximum number of iterations
+ * @return Number of iterations performed (-1 if not converged)
+ */
+template <typename TeamMember>
+KOKKOS_INLINE_FUNCTION int
+PCG_Solve_Team(
+    const TeamMember& team,
+    const int         n,
+    const int*        rowPtr,
+    const int*        colInd,
+    const double*     values,
+    const double*     diag,
+    const double*     rhs,
+    double*           sol,
+    double*           work,
+    const double      tol     = 1e-10,
+    const int         maxIter = 1000)
+{
+  // Partition workspace
+  double* r  = work;          // Residual (size n)
+  double* z  = work + n;      // Preconditioned residual (size n)
+  double* p  = work + 2 * n;  // Search direction (size n)
+  double* Ap = work + 3 * n;  // A times p (size n)
+
+  // Compute initial residual: r = b - Ax (team-parallel SpMV)
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) {
+    double Ax_i = 0.0;
+    for (int k = rowPtr[i]; k < rowPtr[i + 1]; ++k) { Ax_i += values[k] * sol[colInd[k]]; }
+    r[i] = rhs[i] - Ax_i;
+  });
+  team.team_barrier();
+
+  // Apply Jacobi preconditioner: z = M^{-1} r
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) {
+    z[i] = (diag[i] != 0.0) ? r[i] / diag[i] : r[i];
+  });
+  team.team_barrier();
+
+  // Initialize search direction: p = z
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) { p[i] = z[i]; });
+  team.team_barrier();
+
+  // Compute initial (r, z) using team-parallel reduction
+  double rz_old = 0.0;
+  Kokkos::parallel_reduce(
+      Kokkos::TeamThreadRange(team, n), [&](int i, double& sum) { sum += r[i] * z[i]; }, rz_old);
+  team.team_barrier();
+
+  // PCG iteration
+  int iter;
+  for (iter = 0; iter < maxIter; ++iter) {
+    // Compute Ap = A * p (team-parallel SpMV)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) {
+      double sum = 0.0;
+      for (int k = rowPtr[i]; k < rowPtr[i + 1]; ++k) { sum += values[k] * p[colInd[k]]; }
+      Ap[i] = sum;
+    });
+    team.team_barrier();
+
+    // Compute (Ap, p) using team-parallel reduction
+    double pAp = 0.0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(team, n), [&](int i, double& sum) { sum += Ap[i] * p[i]; }, pAp);
+    team.team_barrier();
+
+    // Check for breakdown
+    if (pAp <= 0.0) { return -1; }
+
+    // Compute step length: alpha = (r, z) / (Ap, p)
+    double alpha = rz_old / pAp;
+
+    // Update solution and residual in parallel
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) {
+      sol[i] += alpha * p[i];
+      r[i] -= alpha * Ap[i];
+    });
+    team.team_barrier();
+
+    // Check convergence using team-parallel reduction
+    double residual_norm_sq = 0.0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(team, n),
+        [&](int i, double& sum) { sum += r[i] * r[i]; },
+        residual_norm_sq);
+    team.team_barrier();
+
+    if (residual_norm_sq < tol * tol) { return iter + 1; }
+
+    // Apply Jacobi preconditioner: z = M^{-1} r
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) {
+      z[i] = (diag[i] != 0.0) ? r[i] / diag[i] : r[i];
+    });
+    team.team_barrier();
+
+    // Compute new (r, z) using team-parallel reduction
+    double rz_new = 0.0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(team, n), [&](int i, double& sum) { sum += r[i] * z[i]; }, rz_new);
+    team.team_barrier();
+
+    // Compute beta = (r_new, z_new) / (r_old, z_old)
+    double beta = rz_new / rz_old;
+
+    // Update search direction: p = z + beta * p
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(team, n), [&](int i) { p[i] = z[i] + beta * p[i]; });
+    team.team_barrier();
+
+    // Update (r, z) for next iteration
+    rz_old = rz_new;
+  }
+
+  return (iter == maxIter) ? -1 : iter + 1;
+}
+
 }  // namespace IMSI
 
 #endif  // PCG_SOLVER_H
