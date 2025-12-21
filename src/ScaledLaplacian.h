@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <fstream>
 
 #include "../main_config.h"
@@ -366,6 +367,9 @@ struct MFEMAssemblyFunctor
 
   // MFEM basis functions (output) [numElements, phiSize]
   Kokkos::View<double**, ExecutionSpace> phiMFEM_global;
+
+  // PCG iteration counter (atomic, size 1)
+  Kokkos::View<int*, ExecutionSpace> totalPcgIterations;
 
   // Coefficient functors
   FuncX ax_func;
@@ -862,7 +866,7 @@ struct MFEMAssemblyFunctor
     for (int ir = 0; ir < numVectorsToSolve; ++ir) {
       // Team-parallel PCG with Jacobi preconditioning
       // All threads participate - no Kokkos::single needed
-      PCG_Solve_Team(
+      int iterCount = PCG_Solve_Team(
           teamMember,
           numFreeDofs,
           &matRowPtr_ii(0),
@@ -874,6 +878,12 @@ struct MFEMAssemblyFunctor
           &pcg_work(0),               // Workspace (size 4*numFreeDofs)
           tol,
           maxIter);
+      // Accumulate iteration count (only one thread per team to avoid over-counting)
+      Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+        if (iterCount > 0) {
+          Kokkos::atomic_add(&totalPcgIterations(0), iterCount);
+        }
+      });
       // Barrier after each solve to ensure completion before next
       teamMember.team_barrier();
     }
@@ -1149,6 +1159,10 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   int const     numElements        = meshInfo.mesh.NumberCells();
   phiMFEM_d = Kokkos::View<double**, ExecutionSpace>("phiMFEM", numElements, phiSize);
 
+  // Allocate PCG iteration counter (single int, atomic updates)
+  Kokkos::View<int*, ExecutionSpace> totalPcgIterations_d("totalPcgIterations", 1);
+  Kokkos::deep_copy(totalPcgIterations_d, 0);
+
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
     auto const numEle = c2e.row_map(ic + 1) - c2e.row_map(ic);
@@ -1236,6 +1250,7 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         matColIdx,
         matValues,
         phiMFEM_d,
+        totalPcgIterations_d,
         ax_device,
         ay_device,
         f_device};
@@ -1243,6 +1258,25 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
 
     Kokkos::fence();
   }
+
+  // Copy iteration count back to host and print statistics
+  auto totalPcgIterations_h = Kokkos::create_mirror_view(totalPcgIterations_d);
+  Kokkos::deep_copy(totalPcgIterations_h, totalPcgIterations_d);
+  int totalPcgIter = totalPcgIterations_h(0);
+
+  // Compute fine-scale mesh size
+  // Each coarse element has ratio x ratio fine elements, so fine mesh is:
+  // numFineNodes = (ratio * numEleX + 1) * (ratio * numEleY + 1)
+  // For a square mesh: numEleX = numEleY = sqrt(numElements)
+  int numElePerDir = static_cast<int>(std::sqrt(static_cast<double>(numElements)));
+  long numFineNodesTotal = static_cast<long>(ratio * numElePerDir + 1) * (ratio * numElePerDir + 1);
+
+  printf("Total PCG iterations: %d (avg %.1f per element, %.1f per basis function)\n",
+         totalPcgIter,
+         static_cast<double>(totalPcgIter) / numElements,
+         static_cast<double>(totalPcgIter) / (3 * numElements));  // 3 basis functions per element
+  printf("Fine-scale mesh: %ld nodes (%d x %d elements, ratio=%d)\n",
+         numFineNodesTotal, ratio * numElePerDir, ratio * numElePerDir, ratio);
 }
 
 /// Implementation of OutputMFEMFine
