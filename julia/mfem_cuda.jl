@@ -625,11 +625,10 @@ end
 
 # CUDA kernel to compute coarse element RHS and stiffness (FUSED version):
 # This kernel fuses transfer_utmp_to_phi and compute_fe_Ke_coarse into one.
-# 1. Loads/computes ALL phi values into shared memory:
-#    - Boundary nodes: from d_phiLocal (Q1 interpolation, same for all elements)
-#    - Interior nodes: from d_utmp (CG solution), plus partition of unity for phi_4
-# 2. Writes d_phi to global memory (for reconstruction kernel)
-# 3. Computes fe_coarse and Ke_coarse using cached phi values
+# 1. Caches boundary phi values in shared memory (from d_phiLocal)
+# 2. Computes interior phi on-the-fly from d_utmp (saves shared memory)
+# 3. Writes d_phi to global memory (for reconstruction kernel)
+# 4. Computes fe_coarse and Ke_coarse
 #
 # fe_coarse[iel, ir] = phi[iel, :, ir]' * rhs_fine[iel, :]
 # Ke_coarse[iel, ir, jr] = phi[iel, :, ir]' * K_b[iel, :, :] * phi[iel, :, jr]
@@ -651,12 +650,12 @@ function compute_fe_Ke_coarse_fused_kernel!(
     offset_nodes = (iel - 1) * numNodes
     offset_utmp = (iel - 1) * nfree
 
-    # Shared memory layout (all offsets in Float64 elements):
-    # - sdata_phi: numNodes * numVectors for ALL phi values
+    # Shared memory layout (fits in 48 KB):
+    # - sdata_phi_boundary: nboundary * numVectors for boundary phi cache
     # - sdata_fe: blockDim().x * numVectors for fe_coarse reduction
     # - sdata_Ke: blockDim().x * 16 for Ke_coarse local accumulation
-    sdata_phi = @cuDynamicSharedMem(Float64, numNodes * numVectors)
-    offset_fe = numNodes * numVectors
+    sdata_phi_boundary = @cuDynamicSharedMem(Float64, nboundary * numVectors)
+    offset_fe = nboundary * numVectors
     sdata_fe = @cuDynamicSharedMem(
         Float64, blockDim().x * numVectors,
         offset_fe * sizeof(Float64)
@@ -673,60 +672,65 @@ function compute_fe_Ke_coarse_fused_kernel!(
     end
 
     # ====================================================================
-    # Load/compute ALL phi values into shared memory
+    # Load boundary phi values into shared memory
     # ====================================================================
-    # Each thread handles multiple nodes in a strided loop
-    for i_node = tid:blockDim().x:numNodes
-        # Check if this node is interior or boundary
-        @inbounds iFree = d_globalToFree[i_node]
+    total_phi_entries = nboundary * numVectors
+    for idx = tid:blockDim().x:total_phi_entries
+        ib = (idx - 1) ÷ numVectors + 1
+        ir = (idx - 1) % numVectors + 1
+        @inbounds iGlobal = d_boundaryToGlobal[ib]
+        @inbounds sdata_phi_boundary[idx] = d_phiLocal[iGlobal, ir]
+    end
 
-        if iFree != -1
-            # Interior node: load from d_utmp, compute phi_4 from partition of unity
-            phi1 = @inbounds d_utmp[offset_utmp + iFree, 1]
-            phi2 = @inbounds d_utmp[offset_utmp + iFree, 2]
-            phi3 = @inbounds d_utmp[offset_utmp + iFree, 3]
-            phi4 = 1.0 - phi1 - phi2 - phi3
+    # ====================================================================
+    # Transfer interior phi from d_utmp to d_phi (fused operation)
+    # ====================================================================
+    for i_free = tid:blockDim().x:nfree
+        @inbounds i_global = d_freeToGlobal[i_free]
 
-            # Store in shared memory
-            base_idx = (i_node - 1) * numVectors
-            @inbounds sdata_phi[base_idx + 1] = phi1
-            @inbounds sdata_phi[base_idx + 2] = phi2
-            @inbounds sdata_phi[base_idx + 3] = phi3
-            @inbounds sdata_phi[base_idx + 4] = phi4
+        # Load from d_utmp and compute phi_4
+        phi1 = @inbounds d_utmp[offset_utmp + i_free, 1]
+        phi2 = @inbounds d_utmp[offset_utmp + i_free, 2]
+        phi3 = @inbounds d_utmp[offset_utmp + i_free, 3]
+        phi4 = 1.0 - phi1 - phi2 - phi3
 
-            # Also write to d_phi for later use by reconstruction kernel
-            @inbounds d_phi[offset_nodes + i_node, 1] = phi1
-            @inbounds d_phi[offset_nodes + i_node, 2] = phi2
-            @inbounds d_phi[offset_nodes + i_node, 3] = phi3
-            @inbounds d_phi[offset_nodes + i_node, 4] = phi4
-        else
-            # Boundary node: copy from d_phiLocal (same for all elements)
-            base_idx = (i_node - 1) * numVectors
-            for ir = 1:numVectors
-                @inbounds phi_val = d_phiLocal[i_node, ir]
-                @inbounds sdata_phi[base_idx + ir] = phi_val
-            end
-            # Note: d_phi already has boundary values from initialization
-        end
+        # Write to d_phi for reconstruction kernel
+        @inbounds d_phi[offset_nodes + i_global, 1] = phi1
+        @inbounds d_phi[offset_nodes + i_global, 2] = phi2
+        @inbounds d_phi[offset_nodes + i_global, 3] = phi3
+        @inbounds d_phi[offset_nodes + i_global, 4] = phi4
     end
 
     sync_threads()
 
     # ====================================================================
-    # Part 1: Compute fe_coarse using reduction (uses cached sdata_phi)
+    # Part 1: Compute fe_coarse using reduction
     # ====================================================================
+    # Helper function to get phi value for any node (boundary or interior)
+    # Boundary: from shared memory, Interior: compute from d_utmp
 
-    # Each thread computes partial sums for all 4 basis functions
     for ir = 1:numVectors
         local_sum = 0.0
-        # Stride loop: each thread processes multiple nodes
         i = tid
         while i <= numNodes
-            base_idx = (i - 1) * numVectors
-            @inbounds local_sum += (
-                sdata_phi[base_idx + ir] *
-                d_rhs_fine[offset_nodes + i]
-            )
+            @inbounds iFree = d_globalToFree[i]
+
+            if iFree != -1
+                # Interior node: compute phi from d_utmp
+                if ir <= 3
+                    @inbounds phi_val = d_utmp[offset_utmp + iFree, ir]
+                else
+                    # phi_4 = 1 - phi_1 - phi_2 - phi_3
+                    @inbounds phi_val = 1.0 - d_utmp[offset_utmp + iFree, 1] -
+                                        d_utmp[offset_utmp + iFree, 2] -
+                                        d_utmp[offset_utmp + iFree, 3]
+                end
+            else
+                # Boundary node: from d_phiLocal (same for all elements)
+                @inbounds phi_val = d_phiLocal[i, ir]
+            end
+
+            @inbounds local_sum += phi_val * d_rhs_fine[offset_nodes + i]
             i += blockDim().x
         end
         @inbounds sdata_fe[(tid - 1) * numVectors + ir] = local_sum
@@ -758,50 +762,50 @@ function compute_fe_Ke_coarse_fused_kernel!(
     sync_threads()
 
     # ====================================================================
-    # Part 2: Compute Ke_coarse = phi^T * K_b * phi (uses cached sdata_phi)
+    # Part 2: Compute Ke_coarse = phi^T * K_b * phi
     # ====================================================================
-
-    # Parallelize over boundary rows: each thread handles some rows
-    # Accumulate locally in shared memory to avoid excessive atomics
-
-    # Block offset for global boundary indexing
     block_offset_boundary = (iel - 1) * nboundary
 
     for iBoundary_local = tid:blockDim().x:nboundary
         if iBoundary_local <= nboundary
-            # Get local node index for this boundary node
             @inbounds iGlobal = d_boundaryToGlobal[iBoundary_local]
-            base_idx_i = (iGlobal - 1) * numVectors
-
-            # Global boundary index for rowptr lookup
             iBoundary_global = block_offset_boundary + iBoundary_local
 
-            # Row range in K_b for this boundary node
             @inbounds row_start = d_rowptr_b[iBoundary_global]
             @inbounds row_end = d_rowptr_b[iBoundary_global + 1] - 1
 
-            # Iterate over non-zeros in this row
             for k_pos = row_start:row_end
                 @inbounds jGlobal_offset = d_colidx_b[k_pos]
                 @inbounds k_val = d_valK_b[k_pos]
-
-                # Convert global offset to local node index
                 jGlobal = jGlobal_offset - offset_nodes
-                base_idx_j = (jGlobal - 1) * numVectors
 
-                # Accumulate contribution to Ke_coarse for all basis pairs
-                # Read phi values from shared memory (NO global memory access!)
+                # Check if jGlobal is interior or boundary
+                @inbounds jFree = d_globalToFree[jGlobal]
+
                 for ir = 1:numVectors
-                    @inbounds phi_i = sdata_phi[base_idx_i + ir]
+                    # phi_i from shared memory (boundary node)
+                    phi_idx_i = (iBoundary_local - 1) * numVectors + ir
+                    @inbounds phi_i = sdata_phi_boundary[phi_idx_i]
                     phi_i_k = phi_i * k_val
 
                     for jr = 1:numVectors
-                        @inbounds phi_j = sdata_phi[base_idx_j + jr]
-                        contribution = phi_i_k * phi_j
+                        # phi_j: compute based on whether j is interior or boundary
+                        if jFree != -1
+                            # Interior node
+                            if jr <= 3
+                                @inbounds phi_j = d_utmp[offset_utmp + jFree, jr]
+                            else
+                                @inbounds phi_j = 1.0 - d_utmp[offset_utmp + jFree, 1] -
+                                                  d_utmp[offset_utmp + jFree, 2] -
+                                                  d_utmp[offset_utmp + jFree, 3]
+                            end
+                        else
+                            # Boundary node: from d_phiLocal
+                            @inbounds phi_j = d_phiLocal[jGlobal, jr]
+                        end
 
-                        # Linear index into local Ke_coarse (4x4 = 16 elems)
+                        contribution = phi_i_k * phi_j
                         ke_idx = (ir - 1) * numVectors + jr
-                        # Accumulate in shared memory (thread-private)
                         @inbounds sdata_Ke[(tid - 1) * 16 + ke_idx] += contribution
                     end
                 end
@@ -1040,8 +1044,8 @@ function main()
     d_fe_coarse_w = CUDA.zeros(Float64, nb_warmup, 4)
     d_Ke_coarse_w = CUDA.zeros(Float64, nb_warmup, 16)
     d_globalToFree_w = cu(workspace_warmup.globalToFree)
-    # Shared memory: phi (numNodes*4) + fe (32*4) + Ke (32*16)
-    shared_mem_w = (numNodes_warmup * 4 + 32 * (4 + 16)) * sizeof(Float64)
+    # Shared memory: phi_boundary (nboundary*4) + fe (32*4) + Ke (32*16)
+    shared_mem_w = (nboundary_w * 4 + 32 * (4 + 16)) * sizeof(Float64)
     @cuda threads=32 blocks=1 shmem=shared_mem_w (
         compute_fe_Ke_coarse_fused_kernel!(
             d_fe_coarse_w, d_Ke_coarse_w, d_phi_w, d_utmp_w, d_phiLocal_w,
@@ -1304,12 +1308,12 @@ function main()
 
     threads_per_block = 128  # Use 128 threads for better occupancy
     num_blocks = nb  # One block per coarse element
-    # Shared memory layout (FUSED kernel caches ALL phi values):
-    # - sdata_phi: numNodes * numVectors (all phi values)
+    # Shared memory layout (FUSED kernel - fits in 48 KB):
+    # - sdata_phi_boundary: nboundary * numVectors (boundary phi cache)
     # - sdata_fe: threads * numVectors (fe_coarse reduction)
     # - sdata_Ke: threads * 16 (Ke_coarse local accumulation)
     shared_mem_size = (
-        numNodes * numVectors +
+        nboundary * numVectors +
         threads_per_block * (numVectors + 16)
     ) * sizeof(Float64)
 
