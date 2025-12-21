@@ -832,16 +832,25 @@ end
 
 function main()
     println("="^70)
-    println("Julia 2D MFEM Assembly (Cuda with Coloring)")
+    println("Julia 2D MFEM Assembly (CUDA with Coloring)")
     println("="^70)
+    println()
+    println("Usage: julia mfem_cuda.jl [nx] [ny] [ratio]")
+    println("  nx:     Coarse mesh elements in x-direction (default: 32)")
+    println("  ny:     Coarse mesh elements in y-direction (default: nx)")
+    println("  ratio:  Fine grid refinement ratio (default: 32)")
+    println("          Note: ratio must be a power of 2 (16, 32, 64, 128, etc.)")
     println()
 
     # ====================================================================
     # Mesh generation
     # ====================================================================
 
-    nx, ny = 32, 32  # Coarse mesh (MFEM)
-    ratio = 32        # Fine grid refinement ratio per coarse element
+    # Parse command-line arguments: julia mfem_cuda.jl [nx] [ny] [ratio]
+    # Defaults: nx=32, ny=32, ratio=32
+    nx = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 32
+    ny = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : nx  # Default ny=nx if not specified
+    ratio = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 32
 
     # Validate ratio is a power of 2 (required for exact floating-point arithmetic)
     if !ispow2(ratio)
@@ -1500,70 +1509,58 @@ function main()
     # ====================================================================
 
     println("="^70)
-    println("Performance Summary (in execution order)")
+    println("Performance Summary")
     println("="^70)
-    println(
-        "  Mesh generation:       ",
-        @sprintf("%8.2f ms", mesh_time * 1000), "  (CPU)"
-    )
-    println(
-        "  Coarse connectivity:   ",
-        @sprintf("%8.2f ms", conn_time * 1000), "  (CPU)"
-    )
-    println(
-        "  Local connectivity:    ",
-        @sprintf("%8.2f ms", local_conn_time * 1000), "  (CPU)"
-    )
-    println(
-        "  Fine assembly:         ",
-        @sprintf("%8.2f ms", gpu_fine_assembly_time * 1000), "  (GPU)"
-    )
-    println(
-        "  CG solve (3 RHS):      ",
-        @sprintf("%8.2f ms", gpu_cg_time * 1000), "  (GPU)"
-    )
-    println(
-        "  Coarse Ke/fe (fused):  ",
-        @sprintf("%8.2f ms", gpu_coarse_assembly_time * 1000), "  (GPU)"
-    )
-    println(
-        "  Coarse scatter:        ",
-        @sprintf("%8.2f ms", assembly_time * 1000), "  (GPU)"
-    )
-    println(
-        "  Boundary conditions:   ",
-        @sprintf("%8.2f ms", bc_time * 1000), "  (CPU)"
-    )
-    println(
-        "  Coarse solve:          ",
-        @sprintf("%8.2f ms", solve_time * 1000), "  (CPU)"
-    )
-    println(
-        "  Reconstruction:        ",
-        @sprintf("%8.2f ms", reconstruct_time * 1000), "  (GPU)"
-    )
-    println()
+
+    # Compute total MFEM assembly time (matching CPU version's "total_time")
+    mfem_assembly_total = gpu_fine_assembly_time + gpu_cg_time +
+                         gpu_coarse_assembly_time + assembly_time
+
+    println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
+    println("  Connectivity/color: ", @sprintf("%8.2f ms", (conn_time + local_conn_time) * 1000))
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_total * 1000), "  (GPU)")
+    println("    ├─ Fine assembly: ", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_fine_assembly_time * 1000, 100*gpu_fine_assembly_time/mfem_assembly_total))
+    println("    ├─ PCG solve:     ", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_cg_time * 1000, 100*gpu_cg_time/mfem_assembly_total))
+    println("    ├─ Coarse compute:", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_coarse_assembly_time * 1000, 100*gpu_coarse_assembly_time/mfem_assembly_total))
+    println("    └─ Scatter:       ", @sprintf("%8.2f ms (%.1f%%)",
+            assembly_time * 1000, 100*assembly_time/mfem_assembly_total))
+    println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
+    println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
+    println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000), "  (GPU)")
     println("  " * "-"^68)
-    cpu_time = (
-        mesh_time + conn_time + local_conn_time + bc_time + solve_time
-    )
-    gpu_time = (
-        gpu_fine_assembly_time + gpu_cg_time +
-        gpu_coarse_assembly_time + assembly_time + reconstruct_time
-    )
-    total_time = cpu_time + gpu_time
-    println(
-        "  CPU Total:             ",
-        @sprintf("%8.2f ms", cpu_time * 1000)
-    )
-    println(
-        "  GPU Total:             ",
-        @sprintf("%8.2f ms", gpu_time * 1000)
-    )
-    println(
-        "  Total:                 ",
-        @sprintf("%8.2f ms", total_time * 1000)
-    )
+
+    total_workflow_time = mesh_time + conn_time + local_conn_time +
+                         mfem_assembly_total + bc_time + solve_time + reconstruct_time
+    println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
+    println()
+
+    # Additional metrics for comparison with CPU version
+    println("="^70)
+    println("Metrics for Comparison")
+    println("="^70)
+    println("  Problem size:")
+    println("    Coarse mesh:      $nx × $ny = ", nx*ny, " elements")
+    println("    MFEM ratio:       $ratio")
+    println("    Effective fine:   $(nx*ratio) × $(ny*ratio) = ", (nx*ratio)*(ny*ratio), " elements")
+    println("    DOFs (coarse):    ", length(mesh.vertex_x))
+    println("    Free DOFs:        ", nfree)
+    println()
+    println("  Assembly breakdown (for comparison with CPU):")
+    println("    Fine assembly:    ", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_fine_assembly_time * 1000, 100*gpu_fine_assembly_time/mfem_assembly_total))
+    println("    PCG solve:        ", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_cg_time * 1000, 100*gpu_cg_time/mfem_assembly_total))
+    println("    Coarse compute:   ", @sprintf("%8.2f ms (%.1f%%)",
+            gpu_coarse_assembly_time * 1000, 100*gpu_coarse_assembly_time/mfem_assembly_total))
+    println("    Scatter:          ", @sprintf("%8.2f ms (%.1f%%)",
+            assembly_time * 1000, 100*assembly_time/mfem_assembly_total))
+    println("    Total assembly:   ", @sprintf("%8.2f ms", mfem_assembly_total * 1000))
+    println()
+    println("  Execution model:    GPU (CUDA kernels)")
+    println("  Number of colors:   ", length(e2e_colors))
     println()
 
     # Solution statistics

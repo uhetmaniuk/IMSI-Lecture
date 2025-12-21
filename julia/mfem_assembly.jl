@@ -40,9 +40,13 @@ using .MFEMWorkspace
 
 """
 Compute MFEM basis functions and coarse element matrices
-Returns: phi (basis functions on fine grid)
+Returns: phi (basis functions on fine grid), fine_asm_time, pcg_time, coarse_time
 Uses optimized assembly with sparse K_ii (interior-interior) and K_b (boundary-all) matrices
 Follows the C++ implementation in src/ScaledLaplacian.h (MFEMAssemblyFunctor::operator())
+
+Note: Individual phase timings (fine_asm_time, pcg_time, coarse_time) are returned but not used
+      in the current implementation. Instead, color-level wall-clock timing is used to match
+      C++ methodology and avoid timing overcounting issues.
 """
 function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Float64},
                               elem::Q1Element{Dim, NNodes}, workspace::MFEWorkspace{Float64, Dim, NNodes},
@@ -104,6 +108,11 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
         @inbounds phi[nodeID, 4] = 1.0 - s  # Basis 3
         @inbounds phi[nodeID, 3] = s        # Basis 2
     end
+
+    # ========================================================================
+    # Phase 1: Fine-grid assembly
+    # ========================================================================
+    t_fine_start = time()
 
     # Assemble fine elements with scatter to K_ii, K_b, and btmp
     @inbounds hx = (x_corner[2] - x_corner[1]) / ratio
@@ -183,6 +192,13 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
         end
     end
 
+    fine_asm_time = time() - t_fine_start
+
+    # ========================================================================
+    # Phase 2: Build initial guess and solve for interior basis functions
+    # ========================================================================
+    t_pcg_start = time()
+
     # Build initial guess for PCG based on Q1 shape functions
     for i = 1:nfree
         @inbounds gi = freeToGlobal[i]
@@ -223,6 +239,13 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
     #if !pcg_info.converged
     #    @warn "PCG-SSOR did not converge: iterations=$(pcg_info.iterations), residual=$(pcg_info.residual_norm)"
     #end
+
+    pcg_time = time() - t_pcg_start
+
+    # ========================================================================
+    # Phase 3: Compute coarse element matrices and RHS
+    # ========================================================================
+    t_coarse_start = time()
 
     # Reconstruct full basis functions: copy interior solutions and compute 4th basis
     for i = 1:nfree
@@ -272,7 +295,9 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
         end
     end
 
-    return phi
+    coarse_time = time() - t_coarse_start
+
+    return phi, fine_asm_time, pcg_time, coarse_time
 end
 
 # ============================================================================
@@ -281,8 +306,11 @@ end
 
 """
 Assemble global system with MFEM elements (thread-parallel with coloring)
-Returns: mat_values, rhs, basis_functions, compute_mfem_time
+Returns: mat_values, rhs, basis_functions, kernel_time, fine_time, pcg_time, coarse_time, scatter_time
 Uses optimized kernels from FEMBase with thread-local workspaces
+
+Timing methodology: For each color, finds the slowest thread and uses its phase breakdown.
+This ensures phases sum correctly to the total time and provides detailed performance insights.
 """
 function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::Int,
                              n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
@@ -304,8 +332,25 @@ function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::I
     max_tid = Threads.maxthreadid()
     workspace_local = [MFEWorkspace{Float64, Dim, NNodes}(ratio) for _ = 1:max_tid]
 
+    # Timing accumulators (sum across colors)
+    # Julia can provide detailed breakdown by tracking per-thread phase timings
+    total_kernel_time = 0.0
+    total_fine_time = 0.0
+    total_pcg_time = 0.0
+    total_coarse_time = 0.0
+    total_scatter_time = 0.0
+
     # Loop over colors
     for (ic, elements) in enumerate(e2e_colors)
+        # Time this color's assembly (wall-clock time)
+        color_start = time()
+
+        # Thread-local timing arrays for phase breakdown
+        thread_total_times = zeros(max_tid)
+        thread_fine_times = zeros(max_tid)
+        thread_pcg_times = zeros(max_tid)
+        thread_coarse_times = zeros(max_tid)
+
         # All elements in this color can be assembled in parallel (no conflicts)
         Threads.@threads for iel in elements
             tid = Threads.threadid()
@@ -329,7 +374,8 @@ function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::I
             end
 
             # Assemble MFEM element and get basis functions using optimized kernel
-            @inbounds basis_functions[iel] = compute_mfem_element!(Ke, fe, elem, workspace, ratio, x, y, ax_func, ay_func, f_func)
+            t_elem_start = time()
+            @inbounds basis_functions[iel], t_fine, t_pcg, t_coarse = compute_mfem_element!(Ke, fe, elem, workspace, ratio, x, y, ax_func, ay_func, f_func)
 
             # Scatter to global arrays (no race condition within same color)
             for i = 1:4
@@ -342,10 +388,37 @@ function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::I
                     @inbounds mat_values[k] += Ke[i, j]
                 end
             end
+            t_elem_total = time() - t_elem_start
+
+            # Accumulate timing for this thread
+            thread_total_times[tid] += t_elem_total
+            thread_fine_times[tid] += t_fine
+            thread_pcg_times[tid] += t_pcg
+            thread_coarse_times[tid] += t_coarse
         end
+
+        # Wall-clock time for this color
+        color_time = time() - color_start
+
+        # Find the slowest thread (determines wall-clock time for this color)
+        slowest_tid = argmax(thread_total_times)
+
+        # Use the slowest thread's phase breakdown (ensures phases sum to total)
+        color_fine = thread_fine_times[slowest_tid]
+        color_pcg = thread_pcg_times[slowest_tid]
+        color_coarse = thread_coarse_times[slowest_tid]
+        color_compute = color_fine + color_pcg + color_coarse
+        color_scatter = thread_total_times[slowest_tid] - color_compute
+
+        # Sum across colors (colors are processed sequentially)
+        total_kernel_time += color_time
+        total_fine_time += color_fine
+        total_pcg_time += color_pcg
+        total_coarse_time += color_coarse
+        total_scatter_time += color_scatter
     end
 
-    return mat_values, rhs, basis_functions
+    return mat_values, rhs, basis_functions, total_kernel_time, total_fine_time, total_pcg_time, total_coarse_time, total_scatter_time
 end
 
 # ============================================================================
@@ -442,6 +515,11 @@ function main()
     println("Julia 2D MFEM Assembly (Thread-Parallel with Coloring)")
     println("="^70)
     println()
+    println("Usage: julia -t <threads> mfem_assembly.jl [nx] [ny] [ratio]")
+    println("  nx:     Coarse mesh elements in x-direction (default: 48)")
+    println("  ny:     Coarse mesh elements in y-direction (default: nx)")
+    println("  ratio:  Fine grid refinement ratio (default: 64)")
+    println()
 
     # Thread info
     println("Number of threads: ", Threads.nthreads())
@@ -451,11 +529,18 @@ function main()
     # Problem setup
     # ========================================================================
 
-    # Material coefficients and forcing term (varying coefficients)
-    ax(x, y, z) = 1.0
-    ay(x, y, z) = 1.0
+    # Material coefficients and forcing term
+    # Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
+    USE_VARYING_COEFFICIENTS = false
+
+    # Define coefficient functions (use ternary operator to switch behavior)
+    ax(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 0.5 * sin(2π * x) * sin(2π * y)) : 1.0
+    ay(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 0.5 * cos(2π * x) * cos(2π * y)) : 1.0
+
+    # Right-hand side (same for both cases)
     function f(x, y, z)
         # Manufactured solution: u = sin(π*x) * sin(π*y)
+        # Note: For varying coefficients, this RHS is no longer exact
         return 2.0 * π^2 * sin(π * x) * sin(π * y)
     end
 
@@ -463,12 +548,20 @@ function main()
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 48, 48  # Coarse mesh (MFEM)
-    ratio = 64        # Fine grid refinement ratio per coarse element
+    # Parse command-line arguments: julia mfem_assembly.jl [nx] [ny] [ratio]
+    # Defaults: nx=48, ny=48, ratio=64
+    nx = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 48
+    ny = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : nx  # Default ny=nx if not specified
+    ratio = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 64
 
     println("Generating coarse mesh: $nx x $ny MFEM elements")
     println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
     println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
+    if USE_VARYING_COEFFICIENTS
+        println("Diffusion coefficients: VARYING (1 + 0.5*sin/cos terms)")
+    else
+        println("Diffusion coefficients: CONSTANT (ax=ay=1)")
+    end
     println()
 
     t0 = time()
@@ -520,19 +613,29 @@ function main()
     # Warm-up run to eliminate JIT compilation overhead
     println("Running JIT warm-up...")
     t_warmup = time()
-    _, _, _ = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
-                                                            ax, ay, f)
+    _, _, _, _, _, _, _, _ = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
+                                                   ax, ay, f)
     warmup_time = time() - t_warmup
     println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
     println()
 
+    # Measure total assembly time (including all overhead)
     t0 = time()
-    mat_values, rhs, basis_functions = assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors,
-                                                            ax, ay, f)
-    assembly_time = time() - t0
+    mat_values, rhs, basis_functions, kernel_time, fine_time, pcg_time, coarse_time, scatter_time =
+        assemble_system_mfem(mesh, elem, ratio, n2n_row_ptr, n2n_col_idx, e2e_colors, ax, ay, f)
+    total_time = time() - t0
+
+    # Overhead = total_time - kernel_time (includes startup, memory allocation, etc.)
+    overhead_time = total_time - kernel_time
 
     println("MFEM assembly complete")
-    println("  Assembly time:         ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  Total assembly time:   ", @sprintf("%.2f ms", total_time * 1000))
+    println("  ├─ Fine assembly:      ", @sprintf("%.2f ms (%.1f%%)", fine_time * 1000, 100*fine_time/total_time))
+    println("  ├─ PCG solve:          ", @sprintf("%.2f ms (%.1f%%)", pcg_time * 1000, 100*pcg_time/total_time))
+    println("  ├─ Coarse computation: ", @sprintf("%.2f ms (%.1f%%)", coarse_time * 1000, 100*coarse_time/total_time))
+    println("  ├─ Global scatter:     ", @sprintf("%.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/total_time))
+    println("  ├─ Kernel time:        ", @sprintf("%.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/total_time))
+    println("  └─ Overhead:           ", @sprintf("%.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/total_time))
     println()
 
     # ========================================================================
@@ -618,13 +721,46 @@ function main()
     println("="^70)
     println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
     println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
-    println("  MFEM assembly:      ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", total_time * 1000))
+    println("    ├─ Fine assembly: ", @sprintf("%8.2f ms (%.1f%%)", fine_time * 1000, 100*fine_time/total_time))
+    println("    ├─ PCG solve:     ", @sprintf("%8.2f ms (%.1f%%)", pcg_time * 1000, 100*pcg_time/total_time))
+    println("    ├─ Coarse compute:", @sprintf("%8.2f ms (%.1f%%)", coarse_time * 1000, 100*coarse_time/total_time))
+    println("    ├─ Scatter:       ", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/total_time))
+    println("    ├─ Kernel total:  ", @sprintf("%8.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/total_time))
+    println("    └─ Overhead:      ", @sprintf("%8.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/total_time))
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
     println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^68)
-    total_time = mesh_time + conn_time + assembly_time + bc_time + solve_time + reconstruct_time
-    println("  Total:              ", @sprintf("%8.2f ms", total_time * 1000))
+    total_workflow_time = mesh_time + conn_time + total_time + bc_time + solve_time + reconstruct_time
+    println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
+    println()
+
+    # Additional metrics for scaling studies
+    println("="^70)
+    println("Metrics for Scaling Studies")
+    println("="^70)
+    println("  Problem size:")
+    println("    Coarse mesh:      $nx × $ny = ", nx*ny, " elements")
+    println("    MFEM ratio:       $ratio")
+    println("    Effective fine:   $(nx*ratio) × $(ny*ratio) = ", (nx*ratio)*(ny*ratio), " elements")
+    println("    DOFs (coarse):    ", length(mesh.vertex_x))
+    println("    Free DOFs:        ", nfree)
+    println()
+    println("  Assembly breakdown (detailed):")
+    println("    Fine assembly:    ", @sprintf("%8.2f ms (%.1f%%)", fine_time * 1000, 100*fine_time/total_time))
+    println("    PCG solve:        ", @sprintf("%8.2f ms (%.1f%%)", pcg_time * 1000, 100*pcg_time/total_time))
+    println("    Coarse compute:   ", @sprintf("%8.2f ms (%.1f%%)", coarse_time * 1000, 100*coarse_time/total_time))
+    println("    Scatter:          ", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/total_time))
+    println("    Kernel total:     ", @sprintf("%8.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/total_time))
+    println("    Overhead:         ", @sprintf("%8.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/total_time))
+    println("    Total assembly:   ", @sprintf("%8.2f ms", total_time * 1000))
+    println()
+    println("  Parallel efficiency:")
+    println("    Threads used:     ", Threads.nthreads())
+    println("    Number of colors: ", length(e2e_colors))
+    nel_total = size(mesh.cell_to_node, 1)
+    println("    Elements/thread:  ", @sprintf("%.1f", nel_total / Threads.nthreads()))
     println()
 
     # Solution statistics

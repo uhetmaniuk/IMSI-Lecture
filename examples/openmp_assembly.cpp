@@ -13,6 +13,7 @@
 ///
 
 #include <Kokkos_Core.hpp>
+#include <iomanip>
 #include <iostream>
 #include <vector>
 
@@ -184,7 +185,24 @@ int main(int argc, char* argv[])
     double assemblyTime = timer.seconds();
 
     std::cout << "=== Assembly Complete ===" << std::endl;
-    std::cout << "Assembly time: " << assemblyTime * 1000.0 << " ms" << std::endl;
+    if (elementType == IMSI::ElementType::MFEM_L) {
+      // Get detailed MFEM timing breakdown
+      double fine_asm_time, pcg_time, coarse_time, scatter_time, total_time;
+      scalarLap.GetMFEMTimings(fine_asm_time, pcg_time, coarse_time, scatter_time, total_time);
+
+      std::cout << "MFEM assembly time:      " << std::fixed << std::setprecision(2)
+                << total_time * 1000.0 << " ms" << std::endl;
+      std::cout << "  ├─ Kernel time:        " << std::fixed << std::setprecision(2)
+                << fine_asm_time * 1000.0 << " ms ("
+                << std::fixed << std::setprecision(1)
+                << 100.0 * fine_asm_time / total_time << "%)" << std::endl;
+      std::cout << "  └─ Overhead:           " << std::fixed << std::setprecision(2)
+                << scatter_time * 1000.0 << " ms ("
+                << std::fixed << std::setprecision(1)
+                << 100.0 * scatter_time / total_time << "%)" << std::endl;
+    } else {
+      std::cout << "Assembly time: " << assemblyTime * 1000.0 << " ms" << std::endl;
+    }
     std::cout << std::endl;
 
     // ========================================================================

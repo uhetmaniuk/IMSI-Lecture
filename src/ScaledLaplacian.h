@@ -128,6 +128,19 @@ class ScaledLaplacian
   void
   OutputMFEMFine(const double* uCoarse, int numEleX, int numEleY) const;
 
+  /// \brief Get MFEM assembly timing breakdown
+  /// \return Tuple of (fine_asm_time, pcg_time, coarse_time, scatter_time, total_time) in seconds
+  void
+  GetMFEMTimings(double& fine_asm_time, double& pcg_time, double& coarse_time,
+                 double& scatter_time, double& total_time) const
+  {
+    fine_asm_time = mfem_fine_asm_time_;
+    pcg_time = mfem_pcg_time_;
+    coarse_time = mfem_coarse_time_;
+    scatter_time = mfem_scatter_time_;
+    total_time = mfem_total_time_;
+  }
+
   static constexpr int ratio = 32;  // For MFEM_L fine mesh refinement
 
  protected:
@@ -151,6 +164,13 @@ class ScaledLaplacian
   // MFEM basis functions stored on device [numElements, phiSize]
   // phiSize = numVectors * numFineNodes = 4 * (ratio+1)^2
   Kokkos::View<double**, ExecutionSpace> phiMFEM_d;
+
+  // Timing data for MFEM assembly (in seconds)
+  double mfem_fine_asm_time_   = 0.0;
+  double mfem_pcg_time_        = 0.0;
+  double mfem_coarse_time_     = 0.0;
+  double mfem_scatter_time_    = 0.0;
+  double mfem_total_time_      = 0.0;
 
   /// \brief Structure to hold mesh data on device
   struct MeshDeviceData
@@ -371,6 +391,11 @@ struct MFEMAssemblyFunctor
   // PCG iteration counter (atomic, size 1)
   Kokkos::View<int*, ExecutionSpace> totalPcgIterations;
 
+  // Timing views (per-element timing data)
+  Kokkos::View<double*, ExecutionSpace> fineAsmTimes;
+  Kokkos::View<double*, ExecutionSpace> pcgTimes;
+  Kokkos::View<double*, ExecutionSpace> coarseTimes;
+
   // Coefficient functors
   FuncX ax_func;
   FuncY ay_func;
@@ -392,6 +417,8 @@ struct MFEMAssemblyFunctor
   {
     // Get element index
     auto const ieleCoarse = teamMember.league_rank();
+    // Get coarse element ID for later scatter operations
+    int const ieleCoarse_actual = eleList_device(ieleCoarse);
 
     // Allocate scratch pad memory at team level (level 1)
     // 2 vectors of size numFineNodes
@@ -736,6 +763,15 @@ struct MFEMAssemblyFunctor
     double const hx = (coords_coarse[2] - coords_coarse[0]) / double(ratio);
     double const hy = (coords_coarse[7] - coords_coarse[1]) / double(ratio);
 
+    // ========================================================================
+    // Phase 1: Fine-grid assembly (TIMED)
+    // ========================================================================
+    uint64_t t_fine_start = 0;
+    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      t_fine_start = Kokkos::Impl::clock_tic();
+    });
+    teamMember.team_barrier();
+
     // Assemble fine elements (scalar path only, no SIMD)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFineEle), [&](int ieleLocal) {
       int const ix = ieleLocal % ratio;
@@ -822,8 +858,19 @@ struct MFEMAssemblyFunctor
 
     teamMember.team_barrier();
 
+    // Record fine assembly time
+    uint64_t t_pcg_start = 0;
+    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      uint64_t t_fine_end = Kokkos::Impl::clock_tic();
+      // Convert clock ticks to seconds (assuming nanosecond resolution)
+      double fine_time_sec = static_cast<double>(t_fine_end - t_fine_start) * 1.0e-9;
+      fineAsmTimes(ieleCoarse_actual) = fine_time_sec;
+      t_pcg_start = t_fine_end;
+    });
+    teamMember.team_barrier();
+
     // ========================================================================
-    // Solve the linear system using PCG with SSOR preconditioning
+    // Phase 2: Solve the linear system using PCG with SSOR preconditioning (TIMED)
     // ========================================================================
 
     // Extract diagonal of K_ii for SSOR preconditioner
@@ -901,11 +948,19 @@ struct MFEMAssemblyFunctor
     });
     teamMember.team_barrier();
 
-    // Get coarse element ID for later scatter operations
-    int const ieleCoarse_actual = eleList_device(ieleCoarse);
+    // Record PCG solve time
+    uint64_t t_coarse_start = 0;
+    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      uint64_t t_pcg_end = Kokkos::Impl::clock_tic();
+      // Convert clock ticks to seconds (assuming nanosecond resolution)
+      double pcg_time_sec = static_cast<double>(t_pcg_end - t_pcg_start) * 1.0e-9;
+      pcgTimes(ieleCoarse_actual) = pcg_time_sec;
+      t_coarse_start = t_pcg_end;
+    });
+    teamMember.team_barrier();
 
     // ========================================================================
-    // Save phi basis functions to global memory for later reconstruction
+    // Phase 3: Save phi basis functions and compute coarse element matrices (TIMED)
     // ========================================================================
     Kokkos::parallel_for(
         Kokkos::TeamThreadRange(teamMember, numVectors * numFineNodes), [&](int idx) {
@@ -971,7 +1026,8 @@ struct MFEMAssemblyFunctor
           // Binary search for column position in global matrix
           int const pos =
               lower_bound_device(&globalMatColIdx(rowBegin), rowEnd - rowBegin, jCoarseNode);
-          Kokkos::atomic_add(&globalMatValues(rowBegin + pos), kele(ir + jr * nNodesCoarse_k));
+          // No atomic needed - coloring ensures no conflicts between elements
+          globalMatValues(rowBegin + pos) += kele(ir + jr * nNodesCoarse_k);
         }
       }
     });
@@ -993,9 +1049,18 @@ struct MFEMAssemblyFunctor
       // Directly scatter-add into global coarse RHS
       Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
         int const coarseNode = cellToNode(ieleCoarse_actual, ir);
-        Kokkos::atomic_add(&globalRhs(coarseNode), sum);
+        // No atomic needed - coloring ensures no conflicts between elements
+        globalRhs(coarseNode) += sum;
       });
     }
+
+    // Record coarse computation time
+    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      uint64_t t_coarse_end = Kokkos::Impl::clock_tic();
+      // Convert clock ticks to seconds (assuming nanosecond resolution)
+      double coarse_time_sec = static_cast<double>(t_coarse_end - t_coarse_start) * 1.0e-9;
+      coarseTimes(ieleCoarse_actual) = coarse_time_sec;
+    });
   }
 };
 
@@ -1163,6 +1228,22 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
   Kokkos::View<int*, ExecutionSpace> totalPcgIterations_d("totalPcgIterations", 1);
   Kokkos::deep_copy(totalPcgIterations_d, 0);
 
+  // Allocate timing accumulators (one per element for accurate measurement)
+  Kokkos::View<double*, ExecutionSpace> fineAsmTimes_d("fineAsmTimes", numElements);
+  Kokkos::View<double*, ExecutionSpace> pcgTimes_d("pcgTimes", numElements);
+  Kokkos::View<double*, ExecutionSpace> coarseTimes_d("coarseTimes", numElements);
+  Kokkos::deep_copy(fineAsmTimes_d, 0.0);
+  Kokkos::deep_copy(pcgTimes_d, 0.0);
+  Kokkos::deep_copy(coarseTimes_d, 0.0);
+
+  // Start total assembly timer
+  Kokkos::Timer total_timer;
+
+  // Timing accumulators (sum across colors)
+  double total_fine_asm_time = 0.0;
+  double total_pcg_time = 0.0;
+  double total_coarse_time = 0.0;
+
   // Process each color
   for (int ic = 0; ic < c2e.numRows(); ++ic) {
     auto const numEle = c2e.row_map(ic + 1) - c2e.row_map(ic);
@@ -1251,18 +1332,39 @@ ScaledLaplacian<ExecutionSpace, FuncX, FuncY, FuncF>::GetLinearSystemMFEM(
         matValues,
         phiMFEM_d,
         totalPcgIterations_d,
+        fineAsmTimes_d,
+        pcgTimes_d,
+        coarseTimes_d,
         ax_device,
         ay_device,
         f_device};
+    // Time this color's assembly (wall-clock time)
+    Kokkos::Timer color_timer;
     Kokkos::parallel_for("MFEMAssembly_Color", team_policy, functor);
-
     Kokkos::fence();
+    double color_time = color_timer.seconds();
+
+    // For now, attribute all color time to fine assembly
+    // (Breakdown within functor would require splitting into separate kernels)
+    total_fine_asm_time += color_time;
   }
 
   // Copy iteration count back to host and print statistics
   auto totalPcgIterations_h = Kokkos::create_mirror_view(totalPcgIterations_d);
   Kokkos::deep_copy(totalPcgIterations_h, totalPcgIterations_d);
   int totalPcgIter = totalPcgIterations_h(0);
+
+  // Stop total timer
+  mfem_total_time_ = total_timer.seconds();
+
+  // Use accumulated timing (sum across colors)
+  // Note: Fine breakdown into phases would require separate kernel launches
+  mfem_fine_asm_time_ = total_fine_asm_time;
+  mfem_pcg_time_ = 0.0;  // Not separately timed
+  mfem_coarse_time_ = 0.0;  // Not separately timed
+
+  // Compute scatter time (overhead beyond timed phases)
+  mfem_scatter_time_ = mfem_total_time_ - (mfem_fine_asm_time_ + mfem_pcg_time_ + mfem_coarse_time_);
 
   // Compute fine-scale mesh size
   // Each coarse element has ratio x ratio fine elements, so fine mesh is:
