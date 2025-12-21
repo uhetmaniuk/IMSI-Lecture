@@ -827,6 +827,49 @@ struct MFEMAssemblyFunctor
         }
       }
     });
+    teamMember.team_barrier();
+
+    // DEBUG: Print K_ii matrix info for element 0 only
+    Kokkos::single(Kokkos::PerTeam(teamMember), [&]() {
+      if (ieleCoarse == 0) {
+        printf("\n=== DEBUG: K_ii for element 0 ===\n");
+        printf("numFreeDofs = %d\n", numFreeDofs);
+        printf("actualNnz_ii = %d\n", matRowPtr_ii(numFreeDofs));
+
+        // Print first few diagonal values
+        printf("\nFirst 5 diagonal values:\n");
+        for (int i = 0; i < 5 && i < numFreeDofs; ++i) {
+          printf("  diag[%d] = %.6e\n", i, diagValues_ii(i));
+        }
+
+        // Print first few rows of K_ii
+        printf("\nFirst 3 rows of K_ii (CSR):\n");
+        for (int row = 0; row < 3 && row < numFreeDofs; ++row) {
+          printf("  Row %d: ", row);
+          for (int k = matRowPtr_ii(row); k < matRowPtr_ii(row + 1); ++k) {
+            printf("(%d, %.4e) ", matColIdx_ii(k), matValues_ii(k));
+          }
+          printf("\n");
+        }
+
+        // Print first few btmp values (RHS for basis function 0)
+        printf("\nFirst 5 btmp values (RHS for basis 0):\n");
+        for (int i = 0; i < 5 && i < numFreeDofs; ++i) {
+          printf("  btmp[%d] = %.6e\n", i, btmp(i));
+        }
+
+        // Check if matrix looks SPD (diagonal should be positive)
+        int negDiag = 0;
+        int zeroDiag = 0;
+        for (int i = 0; i < numFreeDofs; ++i) {
+          if (diagValues_ii(i) < 0) negDiag++;
+          if (diagValues_ii(i) == 0) zeroDiag++;
+        }
+        printf("\nDiagonal check: %d negative, %d zero out of %d\n", negDiag, zeroDiag, numFreeDofs);
+        printf("=== END DEBUG ===\n\n");
+      }
+    });
+    teamMember.team_barrier();
 
     // Allocate workspace for PCG (4 * numFreeDofs per vector)
     constexpr int     numVectorsToSolve = 3;  // Solve only first 3, get 4th from partition of unity
