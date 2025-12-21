@@ -504,6 +504,12 @@ struct MFEMAssemblyFunctor
     // CSR matrix row pointer (we'll compute actual nnz before allocating colIdx and values)
     scratch_int_1d matRowPtr_ii(teamMember.team_scratch(1), numFreeDofs + 1);
 
+    // CUDA fix: explicitly zero scratch memory (may contain garbage on first kernel launch)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs + 1), [&](int i) {
+      matRowPtr_ii(i) = 0;
+    });
+    teamMember.team_barrier();
+
     // Get the sparsity graph of K_ii (interior-interior stiffness matrix)
     // Map from free DOF index to sparsity pattern
     Kokkos::parallel_scan(
