@@ -849,8 +849,8 @@ struct MFEMAssemblyFunctor
 
     // Solve for each of the first 3 basis functions using team-parallel PCG
     // All threads in the team participate in SpMV, dot products, and vector updates
-    double const tol     = 1e-10;  // Convergence tolerance (relaxed slightly for GPU)
-    int const    maxIter = 500;    // Maximum PCG iterations
+    double const tol     = 1e-12;  // Convergence tolerance (tight for accuracy)
+    int const    maxIter = 2000;   // Maximum PCG iterations (Jacobi needs more than SSOR)
 
     for (int ir = 0; ir < numVectorsToSolve; ++ir) {
       // Team-parallel PCG with Jacobi preconditioning
