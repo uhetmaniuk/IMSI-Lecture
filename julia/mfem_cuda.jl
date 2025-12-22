@@ -1052,12 +1052,14 @@ function main()
         d_precond_w, d_colptr_ii_w, d_rowidx_ii_w, d_valK_ii_w, nfree_w
     )
     CUDA.synchronize()
-    precond_w = Diagonal(d_precond_w)
-    # Use regular CG for each RHS column (warm-up)
+    # Use PCG_GPU for warm-up (each RHS column)
+    workspace_w = PCG_GPU.PCGWorkspace(K_warmup, view(d_btmp_w, :, 1))
+    PCG_GPU.extract_diagonal!(workspace_w.diag, K_warmup)
     for col = 1:size(d_btmp_w, 2)
         x_col = view(d_utmp_w, :, col)
         b_col = view(d_btmp_w, :, col)
-        cg(K_warmup, b_col; M=precond_w, atol=1e-6, rtol=1e-6, itmax=5, verbose=0)
+        PCG_GPU.pcg_solve!(x_col, workspace_w, K_warmup, b_col;
+                          tol=1e-6, maxiter=5, verbose=0)
     end
     CUDA.synchronize()
 
