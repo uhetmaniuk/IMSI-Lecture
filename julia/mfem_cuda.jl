@@ -1283,30 +1283,17 @@ function main()
         b_col = view(d_btmp, :, col)
         x_col = view(d_utmp, :, col)  # Initial guess AND output (in-place)
 
-        # Check if initial guess is close to solution
-        r0 = b_col - K_ii_gpu * x_col
-        r0_norm = norm(r0)
-        b_norm = norm(b_col)
-        rel_residual = r0_norm / max(b_norm, 1e-16)
-        println("  RHS $col: ||r0|| = ", @sprintf("%.2e", r0_norm),
-                ", ||b|| = ", @sprintf("%.2e", b_norm),
-                ", relative = ", @sprintf("%.2e", rel_residual))
+        # Solve in-place with PCG_GPU (respects initial guess!)
+        info = PCG_GPU.pcg_solve!(x_col, workspace, K_ii_gpu, b_col;
+                                 tol=1e-12, maxiter=1000, verbose=0)
 
-        # Skip PCG if initial guess is already converged
-        if rel_residual < 1e-12
-            println("    Already converged - skipping solve")
-            total_iters += 0
+        total_iters += info.iterations > 0 ? info.iterations : 0
+        all_converged = all_converged && info.converged
+
+        if !info.converged
+            @warn "RHS $col did not converge: residual = $(info.residual_norm)"
         else
-            # Solve in-place with PCG_GPU (respects initial guess!)
-            info = PCG_GPU.pcg_solve!(x_col, workspace, K_ii_gpu, b_col;
-                                     tol=1e-12, maxiter=1000, verbose=0)
-
-            total_iters += info.iterations > 0 ? info.iterations : 0
-            all_converged = all_converged && info.converged
-
-            if !info.converged
-                @warn "RHS $col did not converge: residual = $(info.residual_norm)"
-            end
+            println("  RHS $col: converged in $(info.iterations) iterations")
         end
     end
     gpu_cg_time = time() - t0
