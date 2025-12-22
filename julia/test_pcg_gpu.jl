@@ -10,6 +10,9 @@ using CUDA
 using CUDA.CUSPARSE
 using Printf
 
+using Krylov
+import Krylov: CgWorkspace, cg!
+
 # Load the PCG_GPU module
 include("PCG_GPU.jl")
 using .PCG_GPU
