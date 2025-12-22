@@ -13,18 +13,12 @@ using LinearAlgebra
 using SparseArrays
 
 # Optional CUDA support (loaded if available)
-if !isdefined(Main, :CUDA)
-    try
-        using CUDA
-        using CUDA.CUSPARSE
-        const HAS_CUDA = CUDA.functional()
-    catch
-        const HAS_CUDA = false
-    end
-else
+try
     using CUDA
     using CUDA.CUSPARSE
-    const HAS_CUDA = CUDA.functional()
+    global HAS_CUDA = CUDA.functional()
+catch
+    global HAS_CUDA = false
 end
 
 export pcg_solve, pcg_solve!, PCGWorkspace
