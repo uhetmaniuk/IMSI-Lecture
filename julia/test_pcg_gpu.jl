@@ -85,8 +85,6 @@ if CUDA.functional()
     println("-"^70)
 
     try
-        using Krylov
-
         # PCG_GPU timing
         CUDA.@sync begin
             t_pcg = @elapsed begin
@@ -97,7 +95,7 @@ if CUDA.functional()
         # Krylov.jl timing
         CUDA.@sync begin
             t_krylov = @elapsed begin
-                solver = CgSolver(A_gpu, b_gpu)
+                solver = CgWorkspace(A_gpu, b_gpu)
                 cg!(solver, A_gpu, b_gpu; atol=1e-10, rtol=0.0, verbose=0)
             end
         end
@@ -107,7 +105,7 @@ if CUDA.functional()
         println(@sprintf("Speedup:   %.2fx", t_krylov / t_pcg))
         println()
     catch e
-        println("Krylov.jl not available (this is fine - just skipping comparison)")
+        println("Krylov.jl comparison failed (this is fine - just skipping)")
         println("Error: $e")
         println()
     end
