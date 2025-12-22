@@ -56,11 +56,11 @@ for threads in 1 2 4 8 16; do
 
     ./build/examples/openmp_assembly.exe -nx 48 -ny 48 -mfem --kokkos-num-threads=$threads > $output_file 2>&1
 
-    # Extract timing data
-    kernel_time=$(grep "Kernel time:" $output_file | awk '{print $3}')
-    overhead_time=$(grep "Overhead:" $output_file | awk '{print $2}')
-    total_time=$(grep "MFEM assembly time:" $output_file | awk '{print $3}')
-    dofs=$(grep "Total DOFs:" $output_file | awk '{print $3}')
+    # Extract timing data (handle Unicode tree characters and formatting)
+    kernel_time=$(grep "Kernel time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    overhead_time=$(grep "Overhead:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    total_time=$(grep "MFEM assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    dofs=$(grep "Total DOFs:" $output_file | awk '{print $NF}')
 
     # Calculate speedup and efficiency
     if [ "$threads" -eq 1 ]; then
@@ -97,11 +97,11 @@ for nx in 16 32 48 64; do
 
     ./build/examples/openmp_assembly.exe -nx $nx -ny $nx -mfem --kokkos-num-threads=$THREADS > $output_file 2>&1
 
-    # Extract timing data
-    kernel_time=$(grep "Kernel time:" $output_file | awk '{print $3}')
-    overhead_time=$(grep "Overhead:" $output_file | awk '{print $2}')
-    total_time=$(grep "MFEM assembly time:" $output_file | awk '{print $3}')
-    dofs=$(grep "Total DOFs:" $output_file | awk '{print $3}')
+    # Extract timing data (handle Unicode tree characters and formatting)
+    kernel_time=$(grep "Kernel time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    overhead_time=$(grep "Overhead:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    total_time=$(grep "MFEM assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    dofs=$(grep "Total DOFs:" $output_file | awk '{print $NF}')
 
     echo "$THREADS,$nx,$nx,$dofs,$kernel_time,$overhead_time,$total_time,N/A,N/A" >> $RESULTS_CSV
     echo "    DOFs: $dofs, Time: ${total_time} ms"
@@ -127,11 +127,11 @@ for threads in 1 2 3 4 6 8 12 16; do
 
     ./build/examples/openmp_assembly.exe -nx 32 -ny 32 -mfem --kokkos-num-threads=$threads > $output_file 2>&1
 
-    # Extract timing data
-    kernel_time=$(grep "Kernel time:" $output_file | awk '{print $3}')
-    overhead_time=$(grep "Overhead:" $output_file | awk '{print $2}')
-    total_time=$(grep "MFEM assembly time:" $output_file | awk '{print $3}')
-    dofs=$(grep "Total DOFs:" $output_file | awk '{print $3}')
+    # Extract timing data (handle Unicode tree characters and formatting)
+    kernel_time=$(grep "Kernel time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    overhead_time=$(grep "Overhead:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    total_time=$(grep "MFEM assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    dofs=$(grep "Total DOFs:" $output_file | awk '{print $NF}')
 
     # Calculate speedup and efficiency
     if [ "$threads" -eq 1 ]; then

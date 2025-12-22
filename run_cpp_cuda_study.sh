@@ -63,9 +63,9 @@ for nx in 8 16 24 32 48; do
 
     ./build/examples/cuda_assembly.exe -nx $nx -ny $nx -mfem > $output_file 2>&1
 
-    # Extract key metrics
-    assembly_time=$(grep "Assembly time:" $output_file | awk '{print $3}')
-    total_dofs=$(grep "Total DOFs:" $output_file | awk '{print $3}')
+    # Extract key metrics (handle formatting variations)
+    assembly_time=$(grep "Assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    total_dofs=$(grep "Total DOFs:" $output_file | awk '{print $NF}')
 
     echo "    DOFs: ${total_dofs}, Assembly: ${assembly_time} ms"
 done
@@ -94,8 +94,8 @@ else
 
         ./build/examples/openmp_assembly.exe -nx $nx -ny $nx -mfem --kokkos-num-threads=8 > $output_file 2>&1
 
-        # Extract key metrics
-        assembly_time=$(grep "MFEM assembly time:" $output_file | awk '{print $3}')
+        # Extract key metrics (handle Unicode tree characters)
+        assembly_time=$(grep "MFEM assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
 
         echo "    Assembly: ${assembly_time} ms"
     done
