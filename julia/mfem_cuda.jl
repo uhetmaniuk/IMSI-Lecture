@@ -16,8 +16,8 @@
 
 using CUDA
 using CUDA.CUSPARSE
-using Krylov
-import Krylov: CgWorkspace, cg!
+# using Krylov
+# import Krylov: CgWorkspace, cg!
 using SparseArrays
 using LinearAlgebra
 using Printf
@@ -33,6 +33,10 @@ using .FEMBase
 # Load PCG solver
 include("PCG.jl")
 using .PCG
+
+# Load GPU-compatible PCG solver
+include("PCG_GPU.jl")
+using .PCG_GPU
 
 # Load MFEM workspace
 include("MFEMWorkspace.jl")
@@ -1264,23 +1268,23 @@ function main()
     prec_time = time() - t0_prec
     println("  Preconditioner build time: ", @sprintf("%.2f ms", prec_time * 1000))
 
-    # Solve K_ii * d_utmp = d_btmp using CG for each RHS column
-    # Use CgSolver workspace for memory reuse and proper warm-start
-    println("Solving CG on GPU (3 RHS columns)...")
+    # Solve K_ii * d_utmp = d_btmp using PCG_GPU for each RHS column
+    println("Solving PCG on GPU (3 RHS columns)...")
+
+    # Create PCG workspace once (reused for all RHS columns)
+    workspace = PCG_GPU.PCGWorkspace(K_ii_gpu, view(d_btmp, :, 1))
+    PCG_GPU.extract_diagonal!(workspace.diag, K_ii_gpu)
+
     t0 = time()
     total_iters = 0
     all_converged = true
 
-    # Create CG solver workspace once (reused for all RHS columns)
-    b_col = view(d_btmp, :, 1)
-    solver = CgWorkspace(K_ii_gpu, b_col)
-
     for col = 1:size(d_btmp, 2)
         b_col = view(d_btmp, :, col)
-        x0_col = view(d_utmp, :, col)
+        x_col = view(d_utmp, :, col)  # Initial guess AND output (in-place)
 
         # Check if initial guess is close to solution
-        r0 = b_col - K_ii_gpu * x0_col
+        r0 = b_col - K_ii_gpu * x_col
         r0_norm = norm(r0)
         b_norm = norm(b_col)
         rel_residual = r0_norm / max(b_norm, 1e-16)
@@ -1288,25 +1292,28 @@ function main()
                 ", ||b|| = ", @sprintf("%.2e", b_norm),
                 ", relative = ", @sprintf("%.2e", rel_residual))
 
-        # Skip CG if initial guess is already converged
+        # Skip PCG if initial guess is already converged
         if rel_residual < 1e-12
-            # Already converged - no iterations needed
-            # Solution is already in x0_col (d_utmp), no copy needed
+            println("    Already converged - skipping solve")
             total_iters += 0
         else
-            # Need to solve - use cg! with warm-start and block Jacobi preconditioner
-            solver = cg!(solver, K_ii_gpu, b_col, x0_col;
-                M=precond, atol=1e-24, rtol=1e-12, itmax=1000, verbose=0)
-            copyto!(view(d_utmp, :, col), solver.x)
-            total_iters += solver.stats.niter
-            all_converged = all_converged && solver.stats.solved
+            # Solve in-place with PCG_GPU (respects initial guess!)
+            info = PCG_GPU.pcg_solve!(x_col, workspace, K_ii_gpu, b_col;
+                                     tol=1e-12, maxiter=1000, verbose=0)
+
+            total_iters += info.iterations > 0 ? info.iterations : 0
+            all_converged = all_converged && info.converged
+
+            if !info.converged
+                @warn "RHS $col did not converge: residual = $(info.residual_norm)"
+            end
         end
     end
     gpu_cg_time = time() - t0
 
-    println("  CG converged: ", all_converged)
+    println("  PCG converged: ", all_converged)
     println("  Total iterations: ", total_iters)
-    println("  GPU CG time: ", @sprintf("%.2f ms", gpu_cg_time * 1000))
+    println("  GPU PCG time: ", @sprintf("%.2f ms", gpu_cg_time * 1000))
     println()
 
     # Compute coarse element RHS and stiffness matrices (FUSED kernel)
