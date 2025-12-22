@@ -7,6 +7,7 @@
 using LinearAlgebra
 using SparseArrays
 using CUDA
+using CUDA.CUSPARSE
 using Printf
 
 # Load the PCG_GPU module
