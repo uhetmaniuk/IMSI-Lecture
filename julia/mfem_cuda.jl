@@ -1274,8 +1274,8 @@ function main()
     println("Solving PCG on GPU (3 RHS columns)...")
 
     # Create PCG workspace once (reused for all RHS columns)
-    workspace = PCG_GPU.PCGWorkspace(K_ii_gpu, view(d_btmp, :, 1))
-    PCG_GPU.extract_diagonal!(workspace.diag, K_ii_gpu)
+    pcg_workspace = PCG_GPU.PCGWorkspace(K_ii_gpu, view(d_btmp, :, 1))
+    PCG_GPU.extract_diagonal!(pcg_workspace.diag, K_ii_gpu)
 
     t0 = time()
     total_iters = 0
@@ -1286,7 +1286,7 @@ function main()
         x_col = view(d_utmp, :, col)  # Initial guess AND output (in-place)
 
         # Solve in-place with PCG_GPU (respects initial guess!)
-        info = PCG_GPU.pcg_solve!(x_col, workspace, K_ii_gpu, b_col;
+        info = PCG_GPU.pcg_solve!(x_col, pcg_workspace, K_ii_gpu, b_col;
                                  tol=1e-12, maxiter=1000, verbose=false)
 
         total_iters += info.iterations > 0 ? info.iterations : 0
