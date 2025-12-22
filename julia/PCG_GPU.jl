@@ -11,6 +11,7 @@ module PCG_GPU
 
 using LinearAlgebra
 using SparseArrays
+using Printf
 
 # Optional CUDA support (loaded if available)
 try
@@ -300,8 +301,5 @@ function pcg_solve!(x::AbstractVector{T}, workspace::PCGWorkspace{T},
 
     return (iterations=-1, converged=false, residual_norm=residual_norm)
 end
-
-# Helper for formatted printing (add Printf if not already loaded)
-using Printf
 
 end # module PCG_GPU
