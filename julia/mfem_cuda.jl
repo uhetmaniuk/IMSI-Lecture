@@ -45,12 +45,14 @@ using .MFEMWorkspace
 
 # Device functions for material coefficients and forcing term
 # Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
-const USE_VARYING_COEFFICIENTS = false
+const USE_VARYING_COEFFICIENTS = true
 
 @inline function ax_func(x, y)
     if USE_VARYING_COEFFICIENTS
-        # Varying coefficient: 1 + 0.5*sin(2πx)*sin(2πy)
-        return 1.0 + 0.5 * sin(2π * x) * sin(2π * y)
+        # Varying coefficient: 1 + 100 * cos(150 * x)^2 * sin(150 * y)^2
+        c = cos(150 * x)
+        s = sin(150 * y)
+        return 1.0 + 100 * c * c * s * s
     else
         return 1.0  # Constant diffusion coefficient
     end
@@ -58,8 +60,10 @@ end
 
 @inline function ay_func(x, y)
     if USE_VARYING_COEFFICIENTS
-        # Varying coefficient: 1 + 0.5*cos(2πx)*cos(2πy)
-        return 1.0 + 0.5 * cos(2π * x) * cos(2π * y)
+        # Varying coefficient: 1 + 100 * cos(150 * x)^2 * sin(150 * y)^2
+        c = cos(150 * x)
+        s = sin(150 * y)
+        return 1.0 + 100 * c * c * s * s
     else
         return 1.0  # Constant diffusion coefficient
     end
@@ -68,7 +72,11 @@ end
 @inline function f_func(x, y)
     # Manufactured solution: u = sin(π*x) * sin(π*y)
     # Note: For varying coefficients, this RHS is no longer exact
-    return 2.0 * π^2 * sin(π * x) * sin(π * y)
+    if USE_VARYING_COEFFICIENTS
+        return sin(x) * sin(y)
+    else
+        return 2.0 * π^2 * sin(π * x) * sin(π * y)
+    end
 end
 
 # Helper function to get Ke value with constant tuple indices (GPU-safe)
@@ -865,7 +873,7 @@ function main()
     )
     println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
     if USE_VARYING_COEFFICIENTS
-        println("Diffusion coefficients: VARYING (1 + 0.5*sin/cos terms)")
+        println("Diffusion coefficients: VARYING (1 + 100 * cos(150*x)^2 * sin(150*y)^2 terms)")
     else
         println("Diffusion coefficients: CONSTANT (ax=ay=1)")
     end

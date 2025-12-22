@@ -12,7 +12,7 @@ using Scalar = double;  // Change to 'float' for FP32
 /// This problem is used in Le Bris, Legoll, Lozinski,
 /// "MsFEM a la Crouzeix-Raviart for Highly Oscillatory Elliptic Problems"
 /// (2013).
-#define IMSI_COEFF 1
+#define IMSI_COEFF 2
 
 #if IMSI_COEFF == 1
 

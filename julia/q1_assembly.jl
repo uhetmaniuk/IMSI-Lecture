@@ -147,6 +147,10 @@ function main()
     println("Julia FEM Assembly Example (Thread-Parallel with Coloring)")
     println("="^70)
     println()
+    println("Usage: julia -t <threads> q1_assembly.jl [nx] [ny]")
+    println("  nx: Mesh elements in x-direction (default: 128)")
+    println("  ny: Mesh elements in y-direction (default: nx)")
+    println()
 
     # Thread info
     println("Number of threads: ", Threads.nthreads())
@@ -156,20 +160,37 @@ function main()
     # Problem setup
     # ========================================================================
 
-    # Material coefficients and forcing term (varying coefficients)
-    ax(x, y, z) = 1.0
-    ay(x, y, z) = 1.0
+    # Material coefficients and forcing term
+    # Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
+    USE_VARYING_COEFFICIENTS = true
+
+    # Define coefficient functions (use ternary operator to switch behavior)
+    ax(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
+    ay(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
+
+    # Right-hand side (same for both cases)
     function f(x, y, z)
         # Manufactured solution: u = sin(π*x) * sin(π*y)
-        return 2.0 * π^2 * sin(π * x) * sin(π * y)
+        # Note: For varying coefficients, this RHS is no longer exact
+        return USE_VARYING_COEFFICIENTS ? sin(x) * sin(y) : 2.0 * π^2 * sin(π * x) * sin(π * y)
     end
 
     # ========================================================================
     # Mesh generation
     # ========================================================================
 
-    nx, ny = 128, 128
+    # Parse command-line arguments: julia q1_assembly.jl [nx] [ny]
+    # Defaults: nx=128, ny=128
+    nx = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 128
+    ny = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : nx  # Default ny=nx if not specified
+
     println("Generating mesh: $nx x $ny Q1 elements")
+    if USE_VARYING_COEFFICIENTS
+        println("Diffusion coefficients: VARYING (1 + 100 * cos(150*x)^2 * sin(150*y)^2 terms)")
+    else
+        println("Diffusion coefficients: CONSTANT (ax=ay=1)")
+    end
+    println()
 
     t0 = time()
     mesh = generate_mesh(nx, ny)
@@ -232,8 +253,14 @@ function main()
                                                                   ax, ay, f)
     assembly_time = time() - t0
 
+    # Compute kernel time (sum of per-color times) and overhead
+    kernel_time = sum(color_times)
+    overhead_time = assembly_time - kernel_time
+
     println("Assembly complete")
     println("  Total assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  ├─ Kernel time:      ", @sprintf("%.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/assembly_time))
+    println("  └─ Overhead:         ", @sprintf("%.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/assembly_time))
     println()
     println("  Time per color:")
     for ic = 1:length(e2e_colors)
@@ -305,6 +332,8 @@ function main()
     println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
     println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
     println("  Assembly:           ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("    ├─ Kernel time:   ", @sprintf("%8.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/assembly_time))
+    println("    └─ Overhead:      ", @sprintf("%8.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/assembly_time))
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
     println("  " * "-"^68)

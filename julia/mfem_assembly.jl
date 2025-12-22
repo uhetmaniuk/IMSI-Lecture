@@ -531,17 +531,17 @@ function main()
 
     # Material coefficients and forcing term
     # Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
-    USE_VARYING_COEFFICIENTS = false
+    USE_VARYING_COEFFICIENTS = true
 
     # Define coefficient functions (use ternary operator to switch behavior)
-    ax(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 0.5 * sin(2π * x) * sin(2π * y)) : 1.0
-    ay(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 0.5 * cos(2π * x) * cos(2π * y)) : 1.0
+    ax(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
+    ay(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
 
     # Right-hand side (same for both cases)
     function f(x, y, z)
         # Manufactured solution: u = sin(π*x) * sin(π*y)
         # Note: For varying coefficients, this RHS is no longer exact
-        return 2.0 * π^2 * sin(π * x) * sin(π * y)
+        return USE_VARYING_COEFFICIENTS ? sin(x) * sin(y) : 2.0 * π^2 * sin(π * x) * sin(π * y)
     end
 
     # ========================================================================
@@ -558,7 +558,7 @@ function main()
     println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
     println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
     if USE_VARYING_COEFFICIENTS
-        println("Diffusion coefficients: VARYING (1 + 0.5*sin/cos terms)")
+        println("Diffusion coefficients: VARYING (1 + 100 * cos(150*x)^2 * sin(150*y)^2 terms)")
     else
         println("Diffusion coefficients: CONSTANT (ax=ay=1)")
     end
