@@ -1059,7 +1059,7 @@ function main()
         x_col = view(d_utmp_w, :, col)
         b_col = view(d_btmp_w, :, col)
         PCG_GPU.pcg_solve!(x_col, workspace_w, K_warmup, b_col;
-                          tol=1e-6, maxiter=5, verbose=0)
+                          tol=1e-6, maxiter=5, verbose=false)
     end
     CUDA.synchronize()
 
@@ -1287,7 +1287,7 @@ function main()
 
         # Solve in-place with PCG_GPU (respects initial guess!)
         info = PCG_GPU.pcg_solve!(x_col, workspace, K_ii_gpu, b_col;
-                                 tol=1e-12, maxiter=1000, verbose=0)
+                                 tol=1e-12, maxiter=1000, verbose=false)
 
         total_iters += info.iterations > 0 ? info.iterations : 0
         all_converged = all_converged && info.converged
