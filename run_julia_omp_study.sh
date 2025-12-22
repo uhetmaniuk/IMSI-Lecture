@@ -1,63 +1,212 @@
 #!/bin/bash
 #
-# Scaling study for MFEM assembly
-# Tests thread scaling and grid refinement
+# CPU (OpenMP) Scaling Study for MFEM Assembly (Julia)
+# Tests thread scaling, grid scaling, and ratio scaling
 #
 
-OUTPUT_DIR="scaling_results"
+OUTPUT_DIR="julia_omp_scaling_results"
 mkdir -p $OUTPUT_DIR
 
-echo "=========================================="
-echo "MFEM Assembly Scaling Study"
-echo "=========================================="
+echo "=========================================================================="
+echo "MFEM Assembly CPU Scaling Study - Julia OpenMP"
+echo "=========================================================================="
+echo ""
+echo "This script studies:"
+echo "  1. Thread scaling (varying thread count, fixed problem)"
+echo "  2. Grid scaling (varying mesh size, fixed ratio)"
+echo "  3. Ratio scaling (varying ratio, fixed mesh)"
 echo ""
 
-# ============================================================
-# Study 1: Thread Scaling (fixed problem size)
-# ============================================================
-echo "Study 1: Thread Scaling (nx=32, ny=32, ratio=32)"
-echo "Running with 1, 2, 4 threads..."
+# Capture system info
+echo "Capturing system information..."
+{
+    echo "=== System Information ==="
+    echo "Date: $(date)"
+    echo "Hostname: $(hostname)"
+    echo "Julia version:"
+    julia --version
+    echo ""
+} > $OUTPUT_DIR/system_info.txt
+
+cat $OUTPUT_DIR/system_info.txt
 echo ""
 
-for threads in 1 2 4; do
+# ==============================================================================
+# Study 1: Thread Scaling (fixed problem size, optimal configuration)
+# ==============================================================================
+echo "=========================================================================="
+echo "Study 1: Thread Scaling (128×128 mesh, ratio=8)"
+echo "=========================================================================="
+echo "Thread counts: 1, 2, 4, 8, 12, 16"
+echo ""
+
+for threads in 1 2 4 8 12 16; do
     echo "  Running with $threads thread(s)..."
-    julia -t $threads julia/mfem_assembly.jl 32 32 32 > $OUTPUT_DIR/thread_${threads}.txt 2>&1
+    output_file="$OUTPUT_DIR/thread_${threads}_128x128_r8.txt"
+
+    julia -t $threads julia/mfem_assembly.jl 128 128 8 > $output_file 2>&1
+
+    # Extract key metrics
+    assembly_time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    echo "    Assembly: ${assembly_time} ms"
 done
 
-echo "Thread scaling study complete."
+echo ""
+echo "Thread scaling complete!"
 echo ""
 
-# ============================================================
-# Study 2: Grid Refinement (fixed threads)
-# ============================================================
-echo "Study 2: Grid Refinement (threads=2, ratio=32)"
-echo "Running with mesh sizes: 16x16, 32x32, 48x48..."
+# ==============================================================================
+# Study 2: Grid Scaling (varying mesh size, fixed ratio=8, fixed threads=8)
+# ==============================================================================
+echo "=========================================================================="
+echo "Study 2: Grid Scaling (ratio=8, 8 threads)"
+echo "=========================================================================="
+echo "Mesh sizes: 16×16, 32×32, 64×64, 128×128, 256×256, 512×512"
 echo ""
 
-for nx in 16 32 48; do
-    echo "  Running with ${nx}x${nx} mesh..."
-    julia -t 2 julia/mfem_assembly.jl $nx $nx 32 > $OUTPUT_DIR/grid_${nx}.txt 2>&1
+RATIO=8
+THREADS=8
+for nx in 16 32 64 128 256 512; do
+    echo "  Running ${nx}×${nx} mesh..."
+    output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r${RATIO}_t${THREADS}.txt"
+
+    julia -t $THREADS julia/mfem_assembly.jl $nx $nx $RATIO > $output_file 2>&1
+
+    # Extract key metrics
+    assembly_time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    dofs=$(grep "DOFs (coarse):" $output_file | awk '{print $NF}')
+
+    echo "    DOFs: ${dofs}, Assembly: ${assembly_time} ms"
 done
 
-echo "Grid refinement study complete."
+echo ""
+echo "Grid scaling complete!"
 echo ""
 
-# ============================================================
-# Study 3: Ratio Scaling (fixed threads and coarse mesh)
-# ============================================================
-echo "Study 3: Ratio Scaling (threads=2, nx=32, ny=32)"
-echo "Running with ratios: 16, 32, 64..."
+# ==============================================================================
+# Study 3: Ratio Scaling (varying ratio, fixed mesh=128×128, fixed threads=8)
+# ==============================================================================
+echo "=========================================================================="
+echo "Study 3: Ratio Scaling (128×128 mesh, 8 threads)"
+echo "=========================================================================="
+echo "Ratios: 4, 8, 16, 32, 64"
 echo ""
 
-for ratio in 16 32 64; do
-    echo "  Running with ratio=$ratio..."
-    julia -t 2 julia/mfem_assembly.jl 32 32 $ratio > $OUTPUT_DIR/ratio_${ratio}.txt 2>&1
+NX=128
+NY=128
+THREADS=8
+for ratio in 4 8 16 32 64; do
+    echo "  Running ratio=${ratio}..."
+    output_file="$OUTPUT_DIR/ratio_${ratio}_mesh${NX}x${NY}_t${THREADS}.txt"
+
+    julia -t $THREADS julia/mfem_assembly.jl $NX $NY $ratio > $output_file 2>&1
+
+    # Extract key metrics
+    assembly_time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    fine_res=$((NX * ratio))
+
+    echo "    Fine res: ${fine_res}×${fine_res}, Assembly: ${assembly_time} ms"
 done
 
-echo "Ratio scaling study complete."
+echo ""
+echo "Ratio scaling complete!"
 echo ""
 
-echo "=========================================="
+# ==============================================================================
+# Generate Summary Report
+# ==============================================================================
+echo "=========================================================================="
+echo "Generating Summary Report"
+echo "=========================================================================="
+
+summary_file="$OUTPUT_DIR/SUMMARY.txt"
+{
+    echo "=========================================================================="
+    echo "MFEM CPU (OpenMP) Scaling Study - Summary Report (Julia)"
+    echo "=========================================================================="
+    echo ""
+    echo "Generated: $(date)"
+    echo ""
+
+    echo "--- Thread Scaling (128×128 mesh, ratio=8) ---"
+    echo "Threads | Assembly (ms) | Speedup | Efficiency"
+    echo "--------|---------------|---------|------------"
+
+    # Get baseline (1 thread) time
+    baseline_file="$OUTPUT_DIR/thread_1_128x128_r8.txt"
+    if [ -f "$baseline_file" ]; then
+        baseline_time=$(grep "Total assembly time:" $baseline_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+        for threads in 1 2 4 8 12 16; do
+            output_file="$OUTPUT_DIR/thread_${threads}_128x128_r8.txt"
+            if [ -f "$output_file" ]; then
+                time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+                if [ ! -z "$time" ] && [ ! -z "$baseline_time" ]; then
+                    speedup=$(echo "scale=2; $baseline_time / $time" | bc)
+                    efficiency=$(echo "scale=1; 100 * $speedup / $threads" | bc)
+                    printf "%7d | %13s | %7sx | %10s%%\n" \
+                           $threads "$time" "$speedup" "$efficiency"
+                fi
+            fi
+        done
+    fi
+    echo ""
+
+    echo "--- Grid Scaling (ratio=8, 8 threads) ---"
+    echo "Mesh    | DOFs   | Fine Res   | Assembly (ms)"
+    echo "--------|--------|------------|---------------"
+
+    for nx in 16 32 64 128 256 512; do
+        output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r8_t8.txt"
+        if [ -f "$output_file" ]; then
+            dofs=$(grep "DOFs (coarse):" $output_file | awk '{print $NF}')
+            fine_res=$((nx * 8))
+            assembly=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+            printf "%4dx%-3d | %6s | %4dx%-5d | %13s\n" \
+                   $nx $nx "$dofs" $fine_res $fine_res "$assembly"
+        fi
+    done
+    echo ""
+
+    echo "--- Ratio Scaling (128×128 mesh, 8 threads) ---"
+    echo "Ratio | Fine Res    | Assembly (ms)"
+    echo "------|-------------|---------------"
+
+    for ratio in 4 8 16 32 64; do
+        output_file="$OUTPUT_DIR/ratio_${ratio}_mesh128x128_t8.txt"
+        if [ -f "$output_file" ]; then
+            fine_res=$((128 * ratio))
+            assembly=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+            printf "%5d | %5dx%-6d | %13s\n" \
+                   $ratio $fine_res $fine_res "$assembly"
+        fi
+    done
+    echo ""
+
+    echo "--- Key Findings ---"
+    echo "• OpenMP scales efficiently with thread count (check efficiency %)"
+    echo "• Assembly time scales with problem size (check grid scaling)"
+    echo "• Higher ratios increase local problem size (check ratio scaling)"
+    echo "• Compare with GPU results for hardware acceleration insights"
+    echo ""
+    echo "=========================================================================="
+    echo "All results available in: $OUTPUT_DIR/"
+    echo "=========================================================================="
+
+} > $summary_file
+
+cat $summary_file
+echo ""
+
+echo "=========================================================================="
 echo "All experiments complete!"
-echo "Results saved in: $OUTPUT_DIR/"
-echo "=========================================="
+echo "=========================================================================="
+echo ""
+echo "Results summary: $summary_file"
+echo "Output directory: $OUTPUT_DIR/"
+echo ""
+echo "To compare with GPU implementation:"
+echo "  ./run_julia_cuda_study.sh"
+echo ""
+echo "=========================================================================="
