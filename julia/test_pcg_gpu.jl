@@ -77,31 +77,37 @@ if CUDA.functional()
     println("Residual (on CPU): ", residual)
     println()
 
-    # Test 3: Compare with Krylov.jl
+    # Test 3: Compare with Krylov.jl (optional)
     println("Test 3: Comparison with Krylov.jl")
     println("-"^70)
 
-    using Krylov
+    try
+        using Krylov
 
-    # PCG_GPU timing
-    CUDA.@sync begin
-        t_pcg = @elapsed begin
-            x_pcg, info_pcg = pcg_solve(A_gpu, b_gpu; x0=x0_gpu, tol=1e-10, verbose=false)
+        # PCG_GPU timing
+        CUDA.@sync begin
+            t_pcg = @elapsed begin
+                x_pcg, info_pcg = pcg_solve(A_gpu, b_gpu; x0=x0_gpu, tol=1e-10, verbose=false)
+            end
         end
-    end
 
-    # Krylov.jl timing
-    CUDA.@sync begin
-        t_krylov = @elapsed begin
-            solver = CgSolver(A_gpu, b_gpu)
-            cg!(solver, A_gpu, b_gpu; atol=1e-10, rtol=0.0, verbose=0)
+        # Krylov.jl timing
+        CUDA.@sync begin
+            t_krylov = @elapsed begin
+                solver = CgSolver(A_gpu, b_gpu)
+                cg!(solver, A_gpu, b_gpu; atol=1e-10, rtol=0.0, verbose=0)
+            end
         end
-    end
 
-    println(@sprintf("PCG_GPU:   %.2f ms (%d iterations)", t_pcg * 1000, info_pcg.iterations))
-    println(@sprintf("Krylov.jl: %.2f ms (%d iterations)", t_krylov * 1000, solver.stats.niter))
-    println(@sprintf("Speedup:   %.2fx", t_krylov / t_pcg))
-    println()
+        println(@sprintf("PCG_GPU:   %.2f ms (%d iterations)", t_pcg * 1000, info_pcg.iterations))
+        println(@sprintf("Krylov.jl: %.2f ms (%d iterations)", t_krylov * 1000, solver.stats.niter))
+        println(@sprintf("Speedup:   %.2fx", t_krylov / t_pcg))
+        println()
+    catch e
+        println("Krylov.jl not available (this is fine - just skipping comparison)")
+        println("Error: $e")
+        println()
+    end
 else
     println("CUDA not available, skipping GPU tests")
     println()
