@@ -148,34 +148,40 @@ Domain: [0,1] x [0,1]
 Returns: Mesh object
 """
 function generate_mesh(nx::Int, ny::Int)
-    # Generate vertices
+    # Generate vertices with NUMA-aware first-touch allocation
     nv = (nx + 1) * (ny + 1)
-    vertex_x = zeros(nv)
-    vertex_y = zeros(nv)
+    vertex_x = Vector{Float64}(undef, nv)
+    vertex_y = Vector{Float64}(undef, nv)
 
-    idx = 1
-    for j = 0:ny
+    # Parallel first-touch initialization - distributes memory across NUMA nodes
+    # Each thread writes to its portion, triggering local NUMA allocation
+    Threads.@threads for j = 0:ny
         for i = 0:nx
-            vertex_x[idx] = Float64(i) / nx
-            vertex_y[idx] = Float64(j) / ny
-            idx += 1
+            idx = i + 1 + j * (nx + 1)
+            @inbounds vertex_x[idx] = Float64(i) / nx
+            @inbounds vertex_y[idx] = Float64(j) / ny
         end
     end
 
-    # Generate elements (Q1 = 4 nodes per element)
+    # Generate elements (Q1 = 4 nodes per element) with parallel first-touch
     nel = nx * ny
-    cell_to_node = zeros(Int, nel, 4)
+    cell_to_node = Matrix{Int}(undef, nel, 4)
 
-    iel = 1
-    for j = 0:ny-1
-        for i = 0:nx-1
-            n1 = j * (nx + 1) + i + 1      # Bottom-left
-            n2 = n1 + 1                     # Bottom-right
-            n3 = n2 + (nx + 1)              # Top-right
-            n4 = n1 + (nx + 1)              # Top-left
-            cell_to_node[iel, :] = [n1, n2, n3, n4]
-            iel += 1
-        end
+    # Parallel first-touch for connectivity array
+    Threads.@threads for iel = 1:nel
+        iel_0 = iel - 1
+        i = iel_0 % nx
+        j = iel_0 ÷ nx
+
+        n1 = j * (nx + 1) + i + 1      # Bottom-left
+        n2 = n1 + 1                     # Bottom-right
+        n3 = n2 + (nx + 1)              # Top-right
+        n4 = n1 + (nx + 1)              # Top-left
+
+        @inbounds cell_to_node[iel, 1] = n1
+        @inbounds cell_to_node[iel, 2] = n2
+        @inbounds cell_to_node[iel, 3] = n3
+        @inbounds cell_to_node[iel, 4] = n4
     end
 
     # Identify boundary nodes

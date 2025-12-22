@@ -222,18 +222,22 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
         @inbounds utmp_init[i, 3] = N3
     end
 
-    # Solve for interior basis functions using in-place PCG with SSOR preconditioning
-    # Use only the filled portions of the pre-allocated arrays
-    K_ii = SparseMatrixCSC(nfree, nfree, colptr_ii[1:nfree+1], rowidx_ii[1:nnz_ii], nzval_ii[1:nnz_ii])
+    # Solve for interior basis functions using raw CSR PCG (NUMA-optimized, zero overhead)
+    # Pass raw CSR arrays directly without SparseMatrixCSC wrapper for maximum performance
+    # This eliminates:
+    # - SparseMatrixCSC construction overhead (~0.5-1 μs per element)
+    # - Multiple dispatch overhead in SparseArrays.mul!
+    # - Bounds checking and type instability
 
     # Copy initial guess to utmp (will be modified in-place)
     utmp = workspace.utmp
     @. utmp = utmp_init
 
-    # Solve in-place (ZERO allocations!)
-    pcg_info = pcg_solve_ssor!(utmp, workspace.pcg_workspace, K_ii, btmp,
-                               omega=1.0, num_ssor_sweeps=1,
-                               tol=1e-12, maxiter=1000, verbose=false)
+    # Solve in-place with raw CSR arrays (ZERO allocations, ZERO dispatch overhead!)
+    pcg_info = pcg_solve_ssor_csr!(utmp, workspace.pcg_workspace, nfree,
+                                   colptr_ii, rowidx_ii, nzval_ii, btmp,
+                                   omega=1.0, num_ssor_sweeps=1,
+                                   tol=1e-12, maxiter=1000, verbose=false)
 
     # Check convergence
     #if !pcg_info.converged
@@ -320,9 +324,19 @@ function assemble_system_mfem(mesh::Mesh, elem::Q1Element{Dim, NNodes}, ratio::I
     nnz = length(n2n_col_idx)
     nel = size(mesh.cell_to_node, 1)
 
-    # Initialize global arrays
-    mat_values = zeros(nnz)
-    rhs = zeros(nnodes)
+    # Initialize global arrays with NUMA-aware first-touch allocation
+    # Allocate uninitialized (no physical memory allocated yet)
+    mat_values = Vector{Float64}(undef, nnz)
+    rhs = Vector{Float64}(undef, nnodes)
+
+    # Parallel first-touch initialization distributes memory across NUMA nodes
+    # The Linux kernel allocates physical pages on the NUMA node where first written
+    Threads.@threads for i = 1:nnz
+        @inbounds mat_values[i] = 0.0
+    end
+    Threads.@threads for i = 1:nnodes
+        @inbounds rhs[i] = 0.0
+    end
 
     # Store basis functions for each element (for fine-scale reconstruction)
     numFineNodes = (ratio + 1) * (ratio + 1)
@@ -441,18 +455,23 @@ function reconstruct_fine_solution(mesh::Mesh, coarse_solution::Vector{Float64},
     ny_fine = ny_coarse * ratio
     nfine = (nx_fine + 1) * (ny_fine + 1)
 
-    # Fine mesh coordinates and solution
-    fine_x = zeros(nfine)
-    fine_y = zeros(nfine)
-    fine_u = zeros(nfine)
+    # Fine mesh coordinates and solution with NUMA-aware allocation
+    fine_x = Vector{Float64}(undef, nfine)
+    fine_y = Vector{Float64}(undef, nfine)
+    fine_u = Vector{Float64}(undef, nfine)
 
-    # Build fine mesh (parallel - independent writes)
+    # Build fine mesh with parallel first-touch (distributes across NUMA nodes)
     Threads.@threads for j = 0:ny_fine
         for i = 0:nx_fine
             idx = (i + 1) + j * (nx_fine + 1)
             @inbounds fine_x[idx] = Float64(i) / nx_fine
             @inbounds fine_y[idx] = Float64(j) / ny_fine
         end
+    end
+
+    # Initialize fine_u with parallel first-touch
+    Threads.@threads for i = 1:nfine
+        @inbounds fine_u[i] = 0.0
     end
 
     # Thread-local temporary arrays (avoid allocations in hot loop)
