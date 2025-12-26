@@ -870,7 +870,7 @@ struct MFEMAssemblyFunctor
     teamMember.team_barrier();
 
     // ========================================================================
-    // Phase 2: Solve the linear system using PCG with SSOR preconditioning (TIMED)
+    // Phase 2: Solve the linear system using PCG with Jaocbi preconditioning (TIMED)
     // ========================================================================
 
     // Extract diagonal of K_ii for SSOR preconditioner

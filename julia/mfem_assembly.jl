@@ -222,9 +222,9 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
         @inbounds utmp_init[i, 3] = N3
     end
 
-    # Solve for interior basis functions using raw CSR PCG (NUMA-optimized, zero overhead)
-    # Pass raw CSR arrays directly without SparseMatrixCSC wrapper for maximum performance
-    # This eliminates:
+    # Solve for interior basis functions using raw CSR PCG with Jacobi preconditioning
+    # (NUMA-optimized, zero overhead). Pass raw CSR arrays directly without
+    # SparseMatrixCSC wrapper for maximum performance. This eliminates:
     # - SparseMatrixCSC construction overhead (~0.5-1 μs per element)
     # - Multiple dispatch overhead in SparseArrays.mul!
     # - Bounds checking and type instability
@@ -234,14 +234,13 @@ function compute_mfem_element!(Ke_coarse::Matrix{Float64}, fe_coarse::Vector{Flo
     @. utmp = utmp_init
 
     # Solve in-place with raw CSR arrays (ZERO allocations, ZERO dispatch overhead!)
-    pcg_info = pcg_solve_ssor_csr!(utmp, workspace.pcg_workspace, nfree,
-                                   colptr_ii, rowidx_ii, nzval_ii, btmp,
-                                   omega=1.0, num_ssor_sweeps=1,
-                                   tol=1e-12, maxiter=1000, verbose=false)
+    pcg_info = pcg_solve_jacobi_csr!(utmp, workspace.pcg_workspace, nfree,
+                                     colptr_ii, rowidx_ii, nzval_ii, btmp,
+                                     tol=1e-12, maxiter=1000, verbose=false)
 
     # Check convergence
     #if !pcg_info.converged
-    #    @warn "PCG-SSOR did not converge: iterations=$(pcg_info.iterations), residual=$(pcg_info.residual_norm)"
+    #    @warn "PCG-Jacobi did not converge: iterations=$(pcg_info.iterations), residual=$(pcg_info.residual_norm)"
     #end
 
     pcg_time = time() - t_pcg_start
