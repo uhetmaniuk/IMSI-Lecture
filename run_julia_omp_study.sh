@@ -4,7 +4,10 @@
 # Tests thread scaling, grid scaling, and ratio scaling
 #
 
-OUTPUT_DIR="julia_omp_scaling_results"
+# Configuration
+RATIO=8
+
+OUTPUT_DIR="julia_omp_scaling_results_r${RATIO}"
 mkdir -p $OUTPUT_DIR
 
 echo "=========================================================================="
@@ -35,16 +38,33 @@ echo ""
 # Study 1: Thread Scaling (fixed problem size, optimal configuration)
 # ==============================================================================
 echo "=========================================================================="
-echo "Study 1: Thread Scaling (128×128 mesh, ratio=8)"
+echo "Study 0: Thread Scaling (48x48 mesh, ratio=${RATIO})"
 echo "=========================================================================="
 echo "Thread counts: 1, 2, 4, 8, 12, 16"
 echo ""
 
 for threads in 1 2 4 8 12 16; do
     echo "  Running with $threads thread(s)..."
-    output_file="$OUTPUT_DIR/thread_${threads}_128x128_r8.txt"
+    output_file="$OUTPUT_DIR/thread_${threads}_48x48_r${RATIO}.txt"
 
-    julia -t $threads julia/mfem_assembly.jl 128 128 8 > $output_file 2>&1
+    julia -t $threads julia/mfem_assembly.jl 48 48 $RATIO > $output_file 2>&1
+
+    # Extract key metrics
+    assembly_time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    echo "    Assembly: ${assembly_time} ms"
+done
+
+echo "=========================================================================="
+echo "Study 1: Thread Scaling (128×128 mesh, ratio=${RATIO})"
+echo "=========================================================================="
+echo "Thread counts: 1, 2, 4, 8, 12, 16"
+echo ""
+
+for threads in 1 2 4 8 12 16; do
+    echo "  Running with $threads thread(s)..."
+    output_file="$OUTPUT_DIR/thread_${threads}_128x128_r${RATIO}.txt"
+
+    julia -t $threads julia/mfem_assembly.jl 128 128 $RATIO > $output_file 2>&1
 
     # Extract key metrics
     assembly_time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -56,17 +76,16 @@ echo "Thread scaling complete!"
 echo ""
 
 # ==============================================================================
-# Study 2: Grid Scaling (varying mesh size, fixed ratio=8, fixed threads=8)
+# Study 2: Grid Scaling (varying mesh size, fixed ratio, fixed threads=8)
 # ==============================================================================
 echo "=========================================================================="
-echo "Study 2: Grid Scaling (ratio=8, 8 threads)"
+echo "Study 2: Grid Scaling (ratio=${RATIO}, 8 threads)"
 echo "=========================================================================="
-echo "Mesh sizes: 16×16, 32×32, 64×64, 128×128, 256×256, 512×512"
+echo "Mesh sizes: 16×16, 32×32, 48x48, 64×64, 128×128, 256×256"
 echo ""
 
-RATIO=8
 THREADS=8
-for nx in 16 32 64 128 256 512; do
+for nx in 16 32 48 64 128 256; do
     echo "  Running ${nx}×${nx} mesh..."
     output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r${RATIO}_t${THREADS}.txt"
 
@@ -128,17 +147,17 @@ summary_file="$OUTPUT_DIR/SUMMARY.txt"
     echo "Generated: $(date)"
     echo ""
 
-    echo "--- Thread Scaling (128×128 mesh, ratio=8) ---"
+    echo "--- Thread Scaling (48x48 mesh, ratio=${RATIO}) ---"
     echo "Threads | Assembly (ms) | Speedup | Efficiency"
     echo "--------|---------------|---------|------------"
 
     # Get baseline (1 thread) time
-    baseline_file="$OUTPUT_DIR/thread_1_128x128_r8.txt"
+    baseline_file="$OUTPUT_DIR/thread_1_48x48_r${RATIO}.txt"
     if [ -f "$baseline_file" ]; then
         baseline_time=$(grep "Total assembly time:" $baseline_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
 
         for threads in 1 2 4 8 12 16; do
-            output_file="$OUTPUT_DIR/thread_${threads}_128x128_r8.txt"
+            output_file="$OUTPUT_DIR/thread_${threads}_48x48_r${RATIO}.txt"
             if [ -f "$output_file" ]; then
                 time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
 
@@ -153,15 +172,40 @@ summary_file="$OUTPUT_DIR/SUMMARY.txt"
     fi
     echo ""
 
-    echo "--- Grid Scaling (ratio=8, 8 threads) ---"
+    echo "--- Thread Scaling (128×128 mesh, ratio=${RATIO}) ---"
+    echo "Threads | Assembly (ms) | Speedup | Efficiency"
+    echo "--------|---------------|---------|------------"
+
+    # Get baseline (1 thread) time
+    baseline_file="$OUTPUT_DIR/thread_1_128x128_r${RATIO}.txt"
+    if [ -f "$baseline_file" ]; then
+        baseline_time=$(grep "Total assembly time:" $baseline_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+        for threads in 1 2 4 8 12 16; do
+            output_file="$OUTPUT_DIR/thread_${threads}_128x128_r${RATIO}.txt"
+            if [ -f "$output_file" ]; then
+                time=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+                if [ ! -z "$time" ] && [ ! -z "$baseline_time" ]; then
+                    speedup=$(echo "scale=2; $baseline_time / $time" | bc)
+                    efficiency=$(echo "scale=1; 100 * $speedup / $threads" | bc)
+                    printf "%7d | %13s | %7sx | %10s%%\n" \
+                           $threads "$time" "$speedup" "$efficiency"
+                fi
+            fi
+        done
+    fi
+    echo ""
+
+    echo "--- Grid Scaling (ratio=${RATIO}, 8 threads) ---"
     echo "Mesh    | DOFs   | Fine Res   | Assembly (ms)"
     echo "--------|--------|------------|---------------"
 
-    for nx in 16 32 64 128 256 512; do
-        output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r8_t8.txt"
+    for nx in 16 32 48 64 128 256; do
+        output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r${RATIO}_t8.txt"
         if [ -f "$output_file" ]; then
             dofs=$(grep "DOFs (coarse):" $output_file | awk '{print $NF}')
-            fine_res=$((nx * 8))
+            fine_res=$((nx * RATIO))
             assembly=$(grep "Total assembly time:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
             printf "%4dx%-3d | %6s | %4dx%-5d | %13s\n" \
                    $nx $nx "$dofs" $fine_res $fine_res "$assembly"
