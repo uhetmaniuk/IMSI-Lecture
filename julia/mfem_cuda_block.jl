@@ -1348,10 +1348,185 @@ function test_large_ratio()
     end
 end
 
+# ============================================================================
+# Main Function (CLI Interface)
+# ============================================================================
+
+function main()
+    println("="^70)
+    println("CUDA 2D MFEM Assembly (One Block Per Coarse Element)")
+    println("="^70)
+    println()
+    println("Usage: julia mfem_cuda_block.jl [nx] [ny] [ratio]")
+    println("  nx:     Coarse mesh elements in x-direction (default: 48)")
+    println("  ny:     Coarse mesh elements in y-direction (default: nx)")
+    println("  ratio:  Fine grid refinement ratio (default: 64)")
+    println()
+
+    if !CUDA.functional()
+        println("ERROR: CUDA not available")
+        return
+    end
+
+    println("CUDA Device: ", CUDA.name(CUDA.device()))
+    println()
+
+    # ========================================================================
+    # Problem setup
+    # ========================================================================
+
+    USE_VARYING_COEFFICIENTS = true
+
+    # ========================================================================
+    # Parse command-line arguments
+    # ========================================================================
+
+    nx = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 48
+    ny = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : nx
+    ratio = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 64
+
+    println("Generating coarse mesh: $nx x $ny MFEM elements")
+    println("MFEM ratio: $ratio (each coarse element has $(ratio)x$(ratio) fine elements)")
+    println("Effective fine resolution: $(nx*ratio) x $(ny*ratio)")
+    if USE_VARYING_COEFFICIENTS
+        println("Diffusion coefficients: VARYING (1 + 100 * cos(150*x)^2 * sin(150*y)^2 terms)")
+    else
+        println("Diffusion coefficients: CONSTANT (ax=ay=1)")
+    end
+    println()
+
+    # ========================================================================
+    # Mesh generation
+    # ========================================================================
+
+    println("Generating mesh...")
+    t0 = time()
+    vertex_x, vertex_y, cell_to_node = generate_test_mesh(nx, ny)
+    mesh = CudaMesh(vertex_x, vertex_y, cell_to_node)
+    mesh_time = time() - t0
+
+    println("  Number of coarse elements: ", mesh.nel)
+    println("  Number of coarse nodes:    ", mesh.nnodes)
+    println("  Mesh generation:           ", @sprintf("%.2f ms", mesh_time * 1000))
+    println()
+
+    # ========================================================================
+    # Pre-compute sparsity patterns
+    # ========================================================================
+
+    println("Pre-computing sparsity patterns...")
+    t0 = time()
+    precomp = MFEMPrecomputed(ratio)
+    precomp_time = time() - t0
+
+    println("  nfree (interior DOFs):     ", precomp.nfree)
+    println("  nboundary (boundary DOFs): ", precomp.nboundary)
+    println("  numNodes per element:      ", precomp.numNodes)
+    println("  nnz(K_ii):                 ", precomp.max_nnz_ii)
+    println("  nnz(K_b):                  ", precomp.max_nnz_b)
+    println("  Pre-computation time:      ", @sprintf("%.2f ms", precomp_time * 1000))
+    println()
+
+    shmem_size = calculate_shmem_size(precomp.nfree, 256)
+    println("Shared memory per block: $(shmem_size) bytes ($(shmem_size ÷ 1024) KB)")
+    println()
+
+    # ========================================================================
+    # MFEM Assembly
+    # ========================================================================
+
+    println("="^70)
+    println("Starting CUDA MFEM Assembly")
+    println("="^70)
+
+    # Warm-up run
+    println("Running JIT warm-up...")
+    t0 = time()
+    Ke_out, fe_out, phi_out = assemble_mfem_cuda_block(mesh, precomp; use_varying_coeffs=USE_VARYING_COEFFICIENTS)
+    CUDA.synchronize()
+    warmup_time = time() - t0
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
+
+    # Timed run
+    println("Running timed assembly...")
+    t0 = time()
+    Ke_out, fe_out, phi_out = assemble_mfem_cuda_block(mesh, precomp; use_varying_coeffs=USE_VARYING_COEFFICIENTS)
+    CUDA.synchronize()
+    assembly_time = time() - t0
+
+    println("MFEM assembly complete")
+    println("  Assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
+    println()
+
+    # ========================================================================
+    # Validation
+    # ========================================================================
+
+    println("Validating results...")
+
+    Ke_cpu = Array(Ke_out)
+    fe_cpu = Array(fe_out)
+
+    # Check symmetry
+    max_sym_error = 0.0
+    for iel = 1:mesh.nel
+        Ke1 = reshape(Ke_cpu[iel, :], 4, 4)
+        sym_error = maximum(abs.(Ke1 - Ke1'))
+        max_sym_error = max(max_sym_error, sym_error)
+    end
+    println("  Max Ke symmetry error: ", @sprintf("%.2e", max_sym_error))
+
+    # Check eigenvalues of first element
+    Ke1 = reshape(Ke_cpu[1, :], 4, 4)
+    eigvals_Ke = eigvals(Symmetric(Ke1))
+    println("  Ke[1] eigenvalues: ", eigvals_Ke)
+    println()
+
+    # ========================================================================
+    # Performance summary
+    # ========================================================================
+
+    println("="^70)
+    println("Performance Summary")
+    println("="^70)
+    println("  Mesh generation:     ", @sprintf("%8.2f ms", mesh_time * 1000))
+    println("  Pre-computation:     ", @sprintf("%8.2f ms", precomp_time * 1000))
+    println("  MFEM assembly:       ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("  " * "-"^60)
+    total_time = mesh_time + precomp_time + assembly_time
+    println("  Total:               ", @sprintf("%8.2f ms", total_time * 1000))
+    println()
+
+    # Additional metrics
+    println("="^70)
+    println("Metrics for Scaling Studies")
+    println("="^70)
+    println("  Problem size:")
+    println("    Coarse mesh:      $nx × $ny = ", nx*ny, " elements")
+    println("    MFEM ratio:       $ratio")
+    println("    Effective fine:   $(nx*ratio) × $(ny*ratio) = ", (nx*ratio)*(ny*ratio), " elements")
+    println("    DOFs (coarse):    ", mesh.nnodes)
+    println("    Interior DOFs/element: ", precomp.nfree)
+    println()
+    println("  CUDA configuration:")
+    println("    Blocks:           ", mesh.nel)
+    println("    Threads/block:    256")
+    println("    Shared memory:    ", shmem_size, " bytes")
+    println()
+    println("  Throughput:")
+    println("    Elements/sec:     ", @sprintf("%.0f", mesh.nel / assembly_time))
+    println("    Fine elements/sec:", @sprintf("%.0f", mesh.nel * ratio * ratio / assembly_time))
+    println()
+
+    # Sample output
+    println("Sample results (element 1):")
+    println("  Ke[1,1:4] = ", Ke_cpu[1, 1:4])
+    println("  fe[1,:] = ", fe_cpu[1, :])
+    println()
+end
+
+# Run main program
 if abspath(PROGRAM_FILE) == @__FILE__
-    test_mfem_cuda_block()
-    println()
-    benchmark_mfem_cuda_block(16, 16, 8)
-    println()
-    test_large_ratio()
+    main()
 end
