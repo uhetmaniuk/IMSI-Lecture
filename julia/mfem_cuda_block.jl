@@ -1832,14 +1832,34 @@ function main()
     d_row_idx = cu(n2n_col_idx)  # Note: n2n_col_idx is row_idx in CSC
     d_cell_to_node = cu(Int32.(fem_mesh.cell_to_node))
 
+    # Pre-upload all color element lists (avoid transfers in timed section)
+    d_color_elements = [cu(Int32.(elements)) for elements in e2e_colors]
+
+    # Warm-up: launch kernel once to trigger JIT compilation before timing
+    if !isempty(e2e_colors)
+        d_warmup = d_color_elements[1]
+        num_warmup = length(e2e_colors[1])
+        threads_per_block = 256
+        num_blocks = cld(num_warmup, threads_per_block)
+        @cuda threads=threads_per_block blocks=num_blocks (
+            assemble_coarse_color_kernel!(
+                d_mat_values, d_rhs, fe_out, Ke_out,
+                d_cell_to_node, d_col_ptr, d_row_idx,
+                d_warmup, num_warmup
+            )
+        )
+        CUDA.synchronize()
+        # Reset matrix values after warm-up (they got modified)
+        CUDA.fill!(d_mat_values, 0.0)
+        CUDA.fill!(d_rhs, 0.0)
+    end
+
     # Assemble by color to avoid race conditions
-    # Do not include the transfer time to match the C++ code
+    # Color element lists already pre-uploaded, no transfers in timed section
     CUDA.synchronize()
     t0 = time()
-    for (ic, elements) in enumerate(e2e_colors)
-        # Upload elements for this color
-        d_elements = cu(Int32.(elements))
-        num_elements = length(elements)
+    for (ic, d_elements) in enumerate(d_color_elements)
+        num_elements = length(e2e_colors[ic])
 
         # Launch kernel: one thread per element in this color
         threads_per_block = 256
