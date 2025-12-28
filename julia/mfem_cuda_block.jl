@@ -1749,12 +1749,19 @@ function main()
     t0 = time()
     # Use FEMBase mesh generation to get Mesh struct with boundary nodes
     fem_mesh = FEMBase.generate_mesh(nx, ny)
+    mesh_gen_time = time() - t0
+
+    # Upload mesh to GPU (timed separately to match C++ CopyMeshToDevice)
+    CUDA.synchronize()
+    t0 = time()
     mesh = CudaMesh(fem_mesh.vertex_x, fem_mesh.vertex_y, fem_mesh.cell_to_node)
-    mesh_time = time() - t0
+    CUDA.synchronize()
+    mesh_upload_time = time() - t0
 
     println("  Number of coarse elements: ", mesh.nel)
     println("  Number of coarse nodes:    ", mesh.nnodes)
-    println("  Mesh generation:           ", @sprintf("%.2f ms", mesh_time * 1000))
+    println("  Mesh generation (CPU):     ", @sprintf("%.2f ms", mesh_gen_time * 1000))
+    println("  Mesh upload (GPU):         ", @sprintf("%.2f ms", mesh_upload_time * 1000))
     println()
 
     # ========================================================================
@@ -1832,12 +1839,10 @@ function main()
     d_row_idx = cu(n2n_col_idx)  # Note: n2n_col_idx is row_idx in CSC
     d_cell_to_node = cu(Int32.(fem_mesh.cell_to_node))
 
-    # Pre-upload all color element lists (avoid transfers in timed section)
-    d_color_elements = [cu(Int32.(elements)) for elements in e2e_colors]
-
     # Warm-up: launch kernel once to trigger JIT compilation before timing
+    # (Upload first color temporarily, run kernel, then discard)
     if !isempty(e2e_colors)
-        d_warmup = d_color_elements[1]
+        d_warmup = cu(Int32.(e2e_colors[1]))
         num_warmup = length(e2e_colors[1])
         threads_per_block = 256
         num_blocks = cld(num_warmup, threads_per_block)
@@ -1855,11 +1860,13 @@ function main()
     end
 
     # Assemble by color to avoid race conditions
-    # Color element lists already pre-uploaded, no transfers in timed section
+    # Per-color element uploads included in timing (matches C++ GetLinearSystemMFEM)
     CUDA.synchronize()
     t0 = time()
-    for (ic, d_elements) in enumerate(d_color_elements)
-        num_elements = length(e2e_colors[ic])
+    for elements in e2e_colors
+        # Upload element list for this color (like C++ deep_copy per color)
+        d_elements = cu(Int32.(elements))
+        num_elements = length(elements)
 
         # Launch kernel: one thread per element in this color
         threads_per_block = 256
@@ -1973,26 +1980,27 @@ function main()
     # Performance summary (matching mfem_cuda.jl format)
     # ========================================================================
 
-    # Group timings to match GPU version structure
-    # "MFEM assembly" = precomp + CUDA kernel + GPU scatter
-    # Do not include the transfer time to match the C++ code
-    mfem_assembly_time = precomp_time + assembly_time + gpu_scatter_time
+    # Group timings to match C++ assemblyTime (includes mesh upload)
+    # "MFEM assembly" = mesh_upload + precomp + CUDA kernel + GPU scatter
+    # This matches C++ GetLinearSystemMFEM which includes CopyMeshToDevice()
+    mfem_assembly_time = mesh_upload_time + precomp_time + assembly_time + gpu_scatter_time
 
     println("="^70)
     println("Performance Summary")
     println("="^70)
-    println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
+    println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_gen_time * 1000))
     println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
-    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_time * 1000), "  (GPU)")
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_time * 1000), "  (GPU, comparable to C++)")
+    println("    ├─ Mesh upload:   ", @sprintf("%8.2f ms (%.1f%%)", mesh_upload_time * 1000, 100*mesh_upload_time/mfem_assembly_time))
     println("    ├─ Pre-compute:   ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
     println("    ├─ CUDA kernel:   ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
-    println("    ├─ GPU scatter:   ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
+    println("    └─ GPU scatter:   ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
     println("  GPU->CPU:           ", @sprintf("%8.2f ms", transfer_time * 1000))
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
     println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^68)
-    total_workflow_time = mesh_time + conn_time + mfem_assembly_time + transfer_time + bc_time + solve_time + reconstruct_time
+    total_workflow_time = mesh_gen_time + conn_time + mfem_assembly_time + transfer_time + bc_time + solve_time + reconstruct_time
     println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
     println()
 
@@ -2008,6 +2016,7 @@ function main()
     println("    Free DOFs:        $nfree")
     println()
     println("  Assembly breakdown (detailed):")
+    println("    Mesh upload:      ", @sprintf("%8.2f ms (%.1f%%)", mesh_upload_time * 1000, 100*mesh_upload_time/mfem_assembly_time))
     println("    Pre-compute:      ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
     println("    CUDA kernel:      ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
     println("    GPU scatter:      ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
