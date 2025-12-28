@@ -873,7 +873,7 @@ struct MFEMAssemblyFunctor
     // Phase 2: Solve the linear system using PCG with Jaocbi preconditioning (TIMED)
     // ========================================================================
 
-    // Extract diagonal of K_ii for SSOR preconditioner
+    // Extract diagonal of K_ii for Jacobi preconditioner
     scratch_double_1d diagValues_ii(teamMember.team_scratch(1), numFreeDofs);
     Kokkos::parallel_for(Kokkos::TeamThreadRange(teamMember, numFreeDofs), [&](int i) {
       diagValues_ii(i) = 0;

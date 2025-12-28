@@ -788,27 +788,28 @@ function assemble_coarse_color_kernel!(
 
         # Scatter RHS: rhs[gi] += fe_coarse[iel, i]
         for i = 1:4
-            gi = nodes[i]
+            gi = @inbounds nodes[i]
             fe_val = @inbounds d_fe_coarse[iel, i]
             @inbounds d_rhs[gi] += fe_val
         end
 
         # Scatter stiffness: mat_values[k] += Ke_coarse[iel, i, j]
-        for i = 1:4
-            gi = nodes[i]
-            for j = 1:4
-                gj = nodes[j]
+        # Loop over columns first to reuse col_ptr loads (4 loads instead of 16)
+        for j = 1:4
+            gj = @inbounds nodes[j]
 
-                # Find position in sparse matrix (CSC format)
-                # K[gi, gj] is stored at column gj, row gi
-                col_start = @inbounds d_col_ptr[gj]
-                col_end = @inbounds d_col_ptr[gj + 1] - 1
+            # Load column bounds once per column (not once per entry)
+            col_start = @inbounds d_col_ptr[gj]
+            col_end = @inbounds d_col_ptr[gj + 1] - 1
+
+            for i = 1:4
+                gi = @inbounds nodes[i]
 
                 # Binary search for row gi in column gj
                 k = binary_search_sparse(d_row_idx, gi, col_start, col_end)
 
                 if k != -1
-                    # Ke_coarse is stored as nb × 16 (flattened 4×4 mat)
+                    # Ke_coarse is stored row-major: (i-1)*4 + j
                     ke_idx = (i - 1) * 4 + j
                     ke_val = @inbounds d_Ke_coarse[iel, ke_idx]
                     @inbounds d_mat_values[k] += ke_val
@@ -1768,8 +1769,10 @@ function main()
     # ========================================================================
 
     println("Pre-computing element sparsity patterns...")
+    CUDA.synchronize()
     t0 = time()
     precomp = MFEMPrecomputed(ratio)
+    CUDA.synchronize()
     precomp_time = time() - t0
 
     shmem_size = calculate_shmem_size(precomp.nfree, 256)
@@ -1808,7 +1811,6 @@ function main()
     # ========================================================================
 
     println("Assembling coarse global matrix on GPU using coloring...")
-    t0 = time()
 
     # Allocate global matrix and RHS on GPU
     nnodes = mesh.nnodes
@@ -1822,6 +1824,9 @@ function main()
     d_cell_to_node = cu(Int32.(fem_mesh.cell_to_node))
 
     # Assemble by color to avoid race conditions
+    # Do not include the transfer time to match the C++ code
+    CUDA.synchronize()
+    t0 = time()
     for (ic, elements) in enumerate(e2e_colors)
         # Upload elements for this color
         d_elements = cu(Int32.(elements))
@@ -1846,17 +1851,20 @@ function main()
     println("  GPU scatter time: ", @sprintf("%.2f ms", gpu_scatter_time * 1000))
 
     # Transfer assembled matrix and RHS to CPU (like mfem_cuda.jl)
+    CUDA.synchronize()
     t0 = time()
     mat_values = Array(d_mat_values)
     rhs = Array(d_rhs)
-    phi_cpu = Array(phi_out)
+    CUDA.synchronize()
     transfer_time = time() - t0
+
+    phi_cpu = Array(phi_out)
 
     println("MFEM assembly complete")
     println("  CUDA kernel time:  ", @sprintf("%.2f ms", assembly_time * 1000))
     println("  GPU scatter time:  ", @sprintf("%.2f ms", gpu_scatter_time * 1000))
-    println("  Transfer time:     ", @sprintf("%.2f ms", transfer_time * 1000))
     println("  Matrix size: $nnodes x $nnodes, nnz: $nnz")
+    println("Transfer time =     ", @sprintf("%.2f ms", transfer_time * 1000))
     println()
 
     # ========================================================================
@@ -1937,8 +1945,9 @@ function main()
     # ========================================================================
 
     # Group timings to match GPU version structure
-    # "MFEM assembly" = precomp + CUDA kernel + GPU scatter + transfer
-    mfem_assembly_time = precomp_time + assembly_time + gpu_scatter_time + transfer_time
+    # "MFEM assembly" = precomp + CUDA kernel + GPU scatter
+    # Do not include the transfer time to match the C++ code
+    mfem_assembly_time = precomp_time + assembly_time + gpu_scatter_time
 
     println("="^70)
     println("Performance Summary")
@@ -1949,12 +1958,12 @@ function main()
     println("    ├─ Pre-compute:   ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
     println("    ├─ CUDA kernel:   ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
     println("    ├─ GPU scatter:   ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
-    println("    └─ GPU->CPU:      ", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
+    println("  GPU->CPU:           ", @sprintf("%8.2f ms", transfer_time * 1000)
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
     println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^68)
-    total_workflow_time = mesh_time + conn_time + mfem_assembly_time + bc_time + solve_time + reconstruct_time
+    total_workflow_time = mesh_time + conn_time + mfem_assembly_time + transfer_time + bc_time + solve_time + reconstruct_time
     println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
     println()
 

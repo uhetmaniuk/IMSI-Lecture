@@ -197,9 +197,12 @@ int main(int argc, char* argv[])
     // Copy results back to host
     // ========================================================================
 
-    std::cout << "Copying results to host..." << std::endl;
+    timer.reset();
     Kokkos::deep_copy(rhs_h, rhs_d);
     Kokkos::deep_copy(matValues_h, matValues_d);
+    Kokkos::fence();
+    double copyTime = timer.seconds();
+    std::cout << "Copying (Kc, fc) to host: " << copyTime * 1000.0 << " ms" << std::endl;
 
     // ========================================================================
     // Apply boundary conditions
