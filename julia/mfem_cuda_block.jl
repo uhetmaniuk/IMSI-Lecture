@@ -28,8 +28,8 @@ using .FEMBase
 # ============================================================================
 
 # PCG parameters
-const PCG_TOL = 1e-10
-const PCG_MAXITER = 500
+const PCG_TOL = 1e-12
+const PCG_MAXITER = 1000
 
 # Gauss Quadrature (2x2 rule)
 const GAUSS_PT = 1.0 / sqrt(3.0)
@@ -260,7 +260,7 @@ end
 
 @inline function assemble_fine_element_device(x1::Float64, y1::Float64, x2::Float64, y2::Float64,
                                                x3::Float64, y3::Float64, x4::Float64, y4::Float64,
-                                               ax_val::Float64, ay_val::Float64, f_val::Float64)
+                                               use_varying_coeffs::Bool)
     Ke11 = 0.0; Ke12 = 0.0; Ke13 = 0.0; Ke14 = 0.0
     Ke21 = 0.0; Ke22 = 0.0; Ke23 = 0.0; Ke24 = 0.0
     Ke31 = 0.0; Ke32 = 0.0; Ke33 = 0.0; Ke34 = 0.0
@@ -296,6 +296,21 @@ end
         dN3_dy = dN3_dxi * invJ12 + dN3_deta * invJ22
         dN4_dx = dN4_dxi * invJ11 + dN4_deta * invJ21
         dN4_dy = dN4_dxi * invJ12 + dN4_deta * invJ22
+
+        # Compute physical coordinates at quadrature point
+        xq = N1 * x1 + N2 * x2 + N3 * x3 + N4 * x4
+        yq = N1 * y1 + N2 * y2 + N3 * y3 + N4 * y4
+
+        # Evaluate coefficients at quadrature point (matching CPU version)
+        if use_varying_coeffs
+            ax_val = 1.0 + 100.0 * cos(150.0 * xq)^2 * sin(150.0 * yq)^2
+            ay_val = ax_val
+            f_val = sin(xq) * sin(yq)
+        else
+            ax_val = 1.0
+            ay_val = 1.0
+            f_val = 2.0 * 3.141592653589793^2 * sin(3.141592653589793 * xq) * sin(3.141592653589793 * yq)
+        end
 
         detJ_w = detJ * w
         ax_detJ_w = ax_val * detJ_w
@@ -521,15 +536,9 @@ function mfem_element_kernel_hybrid!(
         x4 = x1
         y4 = y3
 
-        xc = 0.25 * (x1 + x2 + x3 + x4)
-        yc = 0.25 * (y1 + y2 + y3 + y4)
-
-        ax_val = use_varying_coeffs ? (1.0 + 100.0 * cos(150.0 * xc)^2 * sin(150.0 * yc)^2) : 1.0
-        ay_val = ax_val
-        f_val = use_varying_coeffs ? sin(xc) * sin(yc) : 2.0 * 3.141592653589793^2 * sin(3.141592653589793 * xc) * sin(3.141592653589793 * yc)
-
+        # Evaluate coefficients at each quadrature point inside assemble_fine_element_device
         Ke11, Ke12, Ke13, Ke14, Ke21, Ke22, Ke23, Ke24, Ke31, Ke32, Ke33, Ke34, Ke41, Ke42, Ke43, Ke44, fe1, fe2, fe3, fe4 =
-            assemble_fine_element_device(x1, y1, x2, y2, x3, y3, x4, y4, ax_val, ay_val, f_val)
+            assemble_fine_element_device(x1, y1, x2, y2, x3, y3, x4, y4, use_varying_coeffs)
 
         node1 = ix + iy * (ratio + Int32(1)) + Int32(1)
         node2 = node1 + Int32(1)
