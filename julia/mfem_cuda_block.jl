@@ -1608,7 +1608,7 @@ end
 
 function main()
     println("="^70)
-    println("CUDA 2D MFEM Assembly (One Block Per Coarse Element)")
+    println("Julia 2D MFEM Assembly (CUDA - One Block Per Coarse Element)")
     println("="^70)
     println()
     println("Usage: julia mfem_cuda_block.jl [nx] [ny] [ratio]")
@@ -1622,6 +1622,7 @@ function main()
         return
     end
 
+    # Device info (similar to thread info in CPU version)
     println("CUDA Device: ", CUDA.name(CUDA.device()))
     println()
 
@@ -1665,35 +1666,31 @@ function main()
     println()
 
     # ========================================================================
-    # Pre-compute sparsity patterns
+    # Pre-compute sparsity patterns (analogous to connectivity/coloring in CPU version)
     # ========================================================================
 
-    println("Pre-computing sparsity patterns...")
+    println("Pre-computing element sparsity patterns...")
     t0 = time()
     precomp = MFEMPrecomputed(ratio)
     precomp_time = time() - t0
 
-    println("  nfree (interior DOFs):     ", precomp.nfree)
-    println("  nboundary (boundary DOFs): ", precomp.nboundary)
-    println("  numNodes per element:      ", precomp.numNodes)
-    println("  nnz(K_ii):                 ", precomp.max_nnz_ii)
-    println("  nnz(K_b):                  ", precomp.max_nnz_b)
+    shmem_size = calculate_shmem_size(precomp.nfree, 256)
+    println("  Interior DOFs per element: ", precomp.nfree)
+    println("  Boundary DOFs per element: ", precomp.nboundary)
+    println("  nnz(K_ii): ", precomp.max_nnz_ii, ", nnz(K_b): ", precomp.max_nnz_b)
+    println("  Shared memory per block:   $(shmem_size) bytes ($(shmem_size ÷ 1024) KB)")
     println("  Pre-computation time:      ", @sprintf("%.2f ms", precomp_time * 1000))
     println()
 
-    shmem_size = calculate_shmem_size(precomp.nfree, 256)
-    println("Shared memory per block: $(shmem_size) bytes ($(shmem_size ÷ 1024) KB)")
-    println()
-
     # ========================================================================
-    # MFEM Assembly
+    # Assembly
     # ========================================================================
 
     println("="^70)
-    println("Starting CUDA MFEM Assembly")
+    println("Starting MFEM Assembly")
     println("="^70)
 
-    # Warm-up run
+    # Warm-up run to eliminate JIT compilation overhead
     println("Running JIT warm-up...")
     t0 = time()
     Ke_out, fe_out, phi_out = assemble_mfem_cuda_block(mesh, precomp; use_varying_coeffs=USE_VARYING_COEFFICIENTS)
@@ -1703,71 +1700,43 @@ function main()
     println()
 
     # Timed run
-    println("Running timed assembly...")
     t0 = time()
     Ke_out, fe_out, phi_out = assemble_mfem_cuda_block(mesh, precomp; use_varying_coeffs=USE_VARYING_COEFFICIENTS)
     CUDA.synchronize()
     assembly_time = time() - t0
 
-    println("MFEM assembly complete")
-    println("  Assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
-    println()
-
     # ========================================================================
     # Transfer results to CPU
     # ========================================================================
 
-    println("Transferring results to CPU...")
     t0 = time()
     Ke_cpu = Array(Ke_out)
     fe_cpu = Array(fe_out)
     phi_cpu = Array(phi_out)
     transfer_time = time() - t0
-    println("  Transfer time: ", @sprintf("%.2f ms", transfer_time * 1000))
-    println()
-
-    # Validation
-    println("Validating element matrices...")
-    max_sym_error = 0.0
-    for iel = 1:mesh.nel
-        Ke1 = reshape(Ke_cpu[iel, :], 4, 4)
-        sym_error = maximum(abs.(Ke1 - Ke1'))
-        max_sym_error = max(max_sym_error, sym_error)
-    end
-    println("  Max Ke symmetry error: ", @sprintf("%.2e", max_sym_error))
-
-    Ke1 = reshape(Ke_cpu[1, :], 4, 4)
-    eigvals_Ke = eigvals(Symmetric(Ke1))
-    println("  Ke[1] eigenvalues: ", eigvals_Ke)
-    println()
 
     # ========================================================================
-    # Build global sparsity pattern
+    # Build global sparsity pattern and scatter
     # ========================================================================
 
-    println("Building global sparsity pattern...")
     t0 = time()
     row_ptr, col_idx = build_n2n_sparsity(nx, ny)
     sparsity_time = time() - t0
 
     nnodes = (nx + 1) * (ny + 1)
     nnz = length(col_idx)
-    println("  Matrix size: $nnodes x $nnodes")
-    println("  Non-zeros:   $nnz")
-    println("  Sparsity time: ", @sprintf("%.2f ms", sparsity_time * 1000))
-    println()
 
-    # ========================================================================
-    # Scatter to global matrix
-    # ========================================================================
-
-    println("Scattering to global matrix...")
     t0 = time()
     mat_values = zeros(nnz)
     rhs = zeros(nnodes)
     scatter_to_global!(mat_values, rhs, Ke_cpu, fe_cpu, cell_to_node, row_ptr, col_idx)
     scatter_time = time() - t0
-    println("  Scatter time: ", @sprintf("%.2f ms", scatter_time * 1000))
+
+    println("MFEM assembly complete")
+    println("  CUDA kernel time:  ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  Transfer time:     ", @sprintf("%.2f ms", transfer_time * 1000))
+    println("  Global scatter:    ", @sprintf("%.2f ms", (sparsity_time + scatter_time) * 1000))
+    println("  Matrix size: $nnodes x $nnodes, nnz: $nnz")
     println()
 
     # ========================================================================
@@ -1830,41 +1799,46 @@ function main()
 
     println("Writing solutions to files...")
 
-    write_solution("mfem_cuda_solution_coarse.txt", vertex_x, vertex_y, coarse_solution)
-    println("  Coarse solution written to: mfem_cuda_solution_coarse.txt")
+    # Use same file names as mfem_assembly.jl for easy comparison
+    write_solution("mfem_solution_coarse.txt", vertex_x, vertex_y, coarse_solution)
+    println("  Coarse solution written to: mfem_solution_coarse.txt")
 
-    open("mfem_cuda_solution_fine.txt", "w") do io
+    open("mfem_solution_fine.txt", "w") do io
         println(io, "# x y u")
         for i = 1:length(fine_u)
             @printf(io, "%.6f %.6f %.6e\n", fine_x[i], fine_y[i], fine_u[i])
         end
     end
-    println("  Fine solution written to: mfem_cuda_solution_fine.txt")
+    println("  Fine solution written to: mfem_solution_fine.txt")
     println()
 
     # ========================================================================
-    # Performance summary
+    # Performance summary (matching mfem_assembly.jl format)
     # ========================================================================
+
+    # Group timings to match CPU version structure
+    # "MFEM assembly" = precomp + CUDA kernel + transfer + sparsity + scatter
+    mfem_assembly_time = precomp_time + assembly_time + transfer_time + sparsity_time + scatter_time
 
     println("="^70)
     println("Performance Summary")
     println("="^70)
-    println("  Mesh generation:     ", @sprintf("%8.2f ms", mesh_time * 1000))
-    println("  Pre-computation:     ", @sprintf("%8.2f ms", precomp_time * 1000))
-    println("  CUDA MFEM assembly:  ", @sprintf("%8.2f ms", assembly_time * 1000))
-    println("  GPU->CPU transfer:   ", @sprintf("%8.2f ms", transfer_time * 1000))
-    println("  Global sparsity:     ", @sprintf("%8.2f ms", sparsity_time * 1000))
-    println("  Scatter to global:   ", @sprintf("%8.2f ms", scatter_time * 1000))
-    println("  Boundary conditions: ", @sprintf("%8.2f ms", bc_time * 1000))
-    println("  Solve:               ", @sprintf("%8.2f ms", solve_time * 1000))
-    println("  Reconstruction:      ", @sprintf("%8.2f ms", reconstruct_time * 1000))
-    println("  " * "-"^60)
-    total_time = mesh_time + precomp_time + assembly_time + transfer_time +
-                 sparsity_time + scatter_time + bc_time + solve_time + reconstruct_time
-    println("  Total:               ", @sprintf("%8.2f ms", total_time * 1000))
+    println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_time * 1000))
+    println("    ├─ Pre-compute:   ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
+    println("    ├─ CUDA kernel:   ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
+    println("    ├─ GPU->CPU:      ", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
+    println("    ├─ Sparsity:      ", @sprintf("%8.2f ms (%.1f%%)", sparsity_time * 1000, 100*sparsity_time/mfem_assembly_time))
+    println("    └─ Scatter:       ", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/mfem_assembly_time))
+    println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
+    println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
+    println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
+    println("  " * "-"^68)
+    total_workflow_time = mesh_time + mfem_assembly_time + bc_time + solve_time + reconstruct_time
+    println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
     println()
 
-    # Additional metrics
+    # Additional metrics for scaling studies
     println("="^70)
     println("Metrics for Scaling Studies")
     println("="^70)
@@ -1874,12 +1848,20 @@ function main()
     println("    Effective fine:   $(nx*ratio) × $(ny*ratio) = ", (nx*ratio)*(ny*ratio), " elements")
     println("    DOFs (coarse):    $nnodes")
     println("    Free DOFs:        $nfree")
-    println("    Interior DOFs/element: ", precomp.nfree)
+    println()
+    println("  Assembly breakdown (detailed):")
+    println("    Pre-compute:      ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
+    println("    CUDA kernel:      ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
+    println("    GPU->CPU transfer:", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
+    println("    Sparsity pattern: ", @sprintf("%8.2f ms (%.1f%%)", sparsity_time * 1000, 100*sparsity_time/mfem_assembly_time))
+    println("    Scatter to global:", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/mfem_assembly_time))
+    println("    Total assembly:   ", @sprintf("%8.2f ms", mfem_assembly_time * 1000))
     println()
     println("  CUDA configuration:")
     println("    Blocks:           ", mesh.nel)
     println("    Threads/block:    256")
-    println("    Shared memory:    $shmem_size bytes")
+    println("    Shared memory:    $shmem_size bytes ($(shmem_size ÷ 1024) KB)")
+    println("    Interior DOFs/element: ", precomp.nfree)
     println()
     println("  Throughput:")
     println("    Elements/sec:     ", @sprintf("%.0f", mesh.nel / assembly_time))
@@ -1903,12 +1885,6 @@ function main()
     println("  Min value: ", @sprintf("%.6e", minval_fine))
     println("  Max value: ", @sprintf("%.6e", maxval_fine))
     println("  Avg value: ", @sprintf("%.6e", avgval_fine))
-    println()
-
-    # Sample output
-    println("Sample results (element 1):")
-    println("  Ke[1,1:4] = ", Ke_cpu[1, 1:4])
-    println("  fe[1,:] = ", fe_cpu[1, :])
     println()
 end
 
