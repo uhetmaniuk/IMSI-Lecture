@@ -19,6 +19,10 @@ using LinearAlgebra
 using SparseArrays
 using Printf
 
+# Load shared FEM base kernels (for mesh connectivity and coloring)
+include("FEMBase.jl")
+using .FEMBase
+
 # ============================================================================
 # Constants and Configuration
 # ============================================================================
@@ -734,6 +738,83 @@ function mfem_element_kernel_hybrid!(
             @inbounds phi_out[iel, i, ir] = phi_all[iel, i, ir]
         end
         i += blocksize
+    end
+
+    return nothing
+end
+
+# ============================================================================
+# GPU Coarse Global Assembly Kernel (from mfem_cuda.jl)
+# ============================================================================
+
+# Binary search helper for sparse matrix lookups
+@inline function binary_search_sparse(indices, val, start_pos, end_pos)
+    left = start_pos
+    right = end_pos
+    while left <= right
+        mid = (left + right) ÷ 2
+        @inbounds idx_val = indices[mid]
+        if idx_val == val
+            return mid
+        elseif idx_val < val
+            left = mid + 1
+        else
+            right = mid - 1
+        end
+    end
+    return -1  # Not found
+end
+
+# CUDA kernel to assemble coarse global matrix and RHS from element
+# matrices. Uses coloring to avoid race conditions (all elements in same
+# color processed in parallel)
+function assemble_coarse_color_kernel!(
+    d_mat_values, d_rhs, d_fe_coarse, d_Ke_coarse,
+    d_cell_to_node, d_col_ptr, d_row_idx, d_elements, num_elements
+)
+    # One thread per element in this color
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if idx <= num_elements
+        # Get element ID from color list
+        iel = @inbounds d_elements[idx]
+
+        # Get element nodes (Q1 element has 4 nodes)
+        node1 = @inbounds d_cell_to_node[iel, 1]
+        node2 = @inbounds d_cell_to_node[iel, 2]
+        node3 = @inbounds d_cell_to_node[iel, 3]
+        node4 = @inbounds d_cell_to_node[iel, 4]
+        nodes = (node1, node2, node3, node4)
+
+        # Scatter RHS: rhs[gi] += fe_coarse[iel, i]
+        for i = 1:4
+            gi = nodes[i]
+            fe_val = @inbounds d_fe_coarse[iel, i]
+            @inbounds d_rhs[gi] += fe_val
+        end
+
+        # Scatter stiffness: mat_values[k] += Ke_coarse[iel, i, j]
+        for i = 1:4
+            gi = nodes[i]
+            for j = 1:4
+                gj = nodes[j]
+
+                # Find position in sparse matrix (CSC format)
+                # K[gi, gj] is stored at column gj, row gi
+                col_start = @inbounds d_col_ptr[gj]
+                col_end = @inbounds d_col_ptr[gj + 1] - 1
+
+                # Binary search for row gi in column gj
+                k = binary_search_sparse(d_row_idx, gi, col_start, col_end)
+
+                if k != -1
+                    # Ke_coarse is stored as nb × 16 (flattened 4×4 mat)
+                    ke_idx = (i - 1) * 4 + j
+                    ke_val = @inbounds d_Ke_coarse[iel, ke_idx]
+                    @inbounds d_mat_values[k] += ke_val
+                end
+            end
+        end
     end
 
     return nothing
@@ -1656,13 +1737,30 @@ function main()
 
     println("Generating mesh...")
     t0 = time()
-    vertex_x, vertex_y, cell_to_node = generate_test_mesh(nx, ny)
-    mesh = CudaMesh(vertex_x, vertex_y, cell_to_node)
+    # Use FEMBase mesh generation to get Mesh struct with boundary nodes
+    fem_mesh = FEMBase.generate_mesh(nx, ny)
+    mesh = CudaMesh(fem_mesh.vertex_x, fem_mesh.vertex_y, fem_mesh.cell_to_node)
     mesh_time = time() - t0
 
     println("  Number of coarse elements: ", mesh.nel)
     println("  Number of coarse nodes:    ", mesh.nnodes)
     println("  Mesh generation:           ", @sprintf("%.2f ms", mesh_time * 1000))
+    println()
+
+    # ========================================================================
+    # Build connectivity and coloring (for GPU global assembly)
+    # ========================================================================
+
+    println("Building mesh connectivity and coloring...")
+    t0 = time()
+    n2n_row_ptr, n2n_col_idx, e2e_colors = FEMBase.build_mesh_connectivity(fem_mesh)
+    conn_time = time() - t0
+
+    nnz_coarse = length(n2n_col_idx)
+    println("  Coarse matrix size: $(mesh.nnodes) x $(mesh.nnodes)")
+    println("  Non-zeros:          $nnz_coarse")
+    println("  Number of colors:   $(length(e2e_colors))")
+    println("  Connectivity time:  ", @sprintf("%.2f ms", conn_time * 1000))
     println()
 
     # ========================================================================
@@ -1706,36 +1804,58 @@ function main()
     assembly_time = time() - t0
 
     # ========================================================================
-    # Transfer results to CPU
+    # GPU Assembly for the coarse global matrix (like mfem_cuda.jl)
     # ========================================================================
 
+    println("Assembling coarse global matrix on GPU using coloring...")
     t0 = time()
-    Ke_cpu = Array(Ke_out)
-    fe_cpu = Array(fe_out)
+
+    # Allocate global matrix and RHS on GPU
+    nnodes = mesh.nnodes
+    nnz = length(n2n_col_idx)
+    d_mat_values = CUDA.zeros(Float64, nnz)
+    d_rhs = CUDA.zeros(Float64, nnodes)
+
+    # Upload sparse matrix structure to GPU (CSC format: col_ptr, row_idx)
+    d_col_ptr = cu(n2n_row_ptr)  # Note: n2n_row_ptr is col_ptr in CSC
+    d_row_idx = cu(n2n_col_idx)  # Note: n2n_col_idx is row_idx in CSC
+    d_cell_to_node = cu(Int32.(fem_mesh.cell_to_node))
+
+    # Assemble by color to avoid race conditions
+    for (ic, elements) in enumerate(e2e_colors)
+        # Upload elements for this color
+        d_elements = cu(Int32.(elements))
+        num_elements = length(elements)
+
+        # Launch kernel: one thread per element in this color
+        threads_per_block = 256
+        num_blocks = cld(num_elements, threads_per_block)
+
+        @cuda threads=threads_per_block blocks=num_blocks (
+            assemble_coarse_color_kernel!(
+                d_mat_values, d_rhs, fe_out, Ke_out,
+                d_cell_to_node, d_col_ptr, d_row_idx,
+                d_elements, num_elements
+            )
+        )
+    end
+    CUDA.synchronize()
+    gpu_scatter_time = time() - t0
+
+    println("  Number of colors: $(length(e2e_colors))")
+    println("  GPU scatter time: ", @sprintf("%.2f ms", gpu_scatter_time * 1000))
+
+    # Transfer assembled matrix and RHS to CPU (like mfem_cuda.jl)
+    t0 = time()
+    mat_values = Array(d_mat_values)
+    rhs = Array(d_rhs)
     phi_cpu = Array(phi_out)
     transfer_time = time() - t0
 
-    # ========================================================================
-    # Build global sparsity pattern and scatter
-    # ========================================================================
-
-    t0 = time()
-    row_ptr, col_idx = build_n2n_sparsity(nx, ny)
-    sparsity_time = time() - t0
-
-    nnodes = (nx + 1) * (ny + 1)
-    nnz = length(col_idx)
-
-    t0 = time()
-    mat_values = zeros(nnz)
-    rhs = zeros(nnodes)
-    scatter_to_global!(mat_values, rhs, Ke_cpu, fe_cpu, cell_to_node, row_ptr, col_idx)
-    scatter_time = time() - t0
-
     println("MFEM assembly complete")
     println("  CUDA kernel time:  ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  GPU scatter time:  ", @sprintf("%.2f ms", gpu_scatter_time * 1000))
     println("  Transfer time:     ", @sprintf("%.2f ms", transfer_time * 1000))
-    println("  Global scatter:    ", @sprintf("%.2f ms", (sparsity_time + scatter_time) * 1000))
     println("  Matrix size: $nnodes x $nnodes, nnz: $nnz")
     println()
 
@@ -1745,14 +1865,14 @@ function main()
 
     println("Applying boundary conditions...")
     t0 = time()
-    boundary_nodes = get_boundary_nodes(nx, ny)
+    # Use boundary nodes from FEMBase mesh
     reduced_row_ptr, reduced_col_idx, reduced_values, reduced_rhs, free_to_global =
-        apply_boundary_conditions(row_ptr, col_idx, mat_values, rhs, boundary_nodes)
+        FEMBase.apply_boundary_conditions(n2n_row_ptr, n2n_col_idx, mat_values, rhs, fem_mesh.boundary_nodes)
     bc_time = time() - t0
 
     nfree = length(free_to_global)
     println("  Total DOFs:    $nnodes")
-    println("  Boundary DOFs: $(length(boundary_nodes))")
+    println("  Boundary DOFs: $(length(fem_mesh.boundary_nodes))")
     println("  Free DOFs:     $nfree")
     println("  Reduced nnz:   $(length(reduced_col_idx))")
     println("  BC time:       ", @sprintf("%.2f ms", bc_time * 1000))
@@ -1786,7 +1906,7 @@ function main()
     end
 
     t0 = time()
-    fine_x, fine_y, fine_u = reconstruct_fine_solution(nx, ny, ratio, coarse_solution, phi_cpu, cell_to_node)
+    fine_x, fine_y, fine_u = reconstruct_fine_solution(nx, ny, ratio, coarse_solution, phi_cpu, fem_mesh.cell_to_node)
     reconstruct_time = time() - t0
 
     println("  Fine mesh size: $(length(fine_u)) nodes")
@@ -1800,7 +1920,7 @@ function main()
     println("Writing solutions to files...")
 
     # Use same file names as mfem_assembly.jl for easy comparison
-    write_solution("mfem_solution_coarse.txt", vertex_x, vertex_y, coarse_solution)
+    write_solution("mfem_solution_coarse.txt", fem_mesh.vertex_x, fem_mesh.vertex_y, coarse_solution)
     println("  Coarse solution written to: mfem_solution_coarse.txt")
 
     open("mfem_solution_fine.txt", "w") do io
@@ -1813,28 +1933,28 @@ function main()
     println()
 
     # ========================================================================
-    # Performance summary (matching mfem_assembly.jl format)
+    # Performance summary (matching mfem_cuda.jl format)
     # ========================================================================
 
-    # Group timings to match CPU version structure
-    # "MFEM assembly" = precomp + CUDA kernel + transfer + sparsity + scatter
-    mfem_assembly_time = precomp_time + assembly_time + transfer_time + sparsity_time + scatter_time
+    # Group timings to match GPU version structure
+    # "MFEM assembly" = precomp + CUDA kernel + GPU scatter + transfer
+    mfem_assembly_time = precomp_time + assembly_time + gpu_scatter_time + transfer_time
 
     println("="^70)
     println("Performance Summary")
     println("="^70)
     println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
-    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_time * 1000))
+    println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
+    println("  MFEM assembly:      ", @sprintf("%8.2f ms", mfem_assembly_time * 1000), "  (GPU)")
     println("    ├─ Pre-compute:   ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
     println("    ├─ CUDA kernel:   ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
-    println("    ├─ GPU->CPU:      ", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
-    println("    ├─ Sparsity:      ", @sprintf("%8.2f ms (%.1f%%)", sparsity_time * 1000, 100*sparsity_time/mfem_assembly_time))
-    println("    └─ Scatter:       ", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/mfem_assembly_time))
+    println("    ├─ GPU scatter:   ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
+    println("    └─ GPU->CPU:      ", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
     println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
     println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
     println("  Reconstruction:     ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^68)
-    total_workflow_time = mesh_time + mfem_assembly_time + bc_time + solve_time + reconstruct_time
+    total_workflow_time = mesh_time + conn_time + mfem_assembly_time + bc_time + solve_time + reconstruct_time
     println("  Total:              ", @sprintf("%8.2f ms", total_workflow_time * 1000))
     println()
 
@@ -1852,10 +1972,12 @@ function main()
     println("  Assembly breakdown (detailed):")
     println("    Pre-compute:      ", @sprintf("%8.2f ms (%.1f%%)", precomp_time * 1000, 100*precomp_time/mfem_assembly_time))
     println("    CUDA kernel:      ", @sprintf("%8.2f ms (%.1f%%)", assembly_time * 1000, 100*assembly_time/mfem_assembly_time))
+    println("    GPU scatter:      ", @sprintf("%8.2f ms (%.1f%%)", gpu_scatter_time * 1000, 100*gpu_scatter_time/mfem_assembly_time))
     println("    GPU->CPU transfer:", @sprintf("%8.2f ms (%.1f%%)", transfer_time * 1000, 100*transfer_time/mfem_assembly_time))
-    println("    Sparsity pattern: ", @sprintf("%8.2f ms (%.1f%%)", sparsity_time * 1000, 100*sparsity_time/mfem_assembly_time))
-    println("    Scatter to global:", @sprintf("%8.2f ms (%.1f%%)", scatter_time * 1000, 100*scatter_time/mfem_assembly_time))
     println("    Total assembly:   ", @sprintf("%8.2f ms", mfem_assembly_time * 1000))
+    println()
+    println("  Execution model:    GPU (CUDA kernels + coloring)")
+    println("  Number of colors:   ", length(e2e_colors))
     println()
     println("  CUDA configuration:")
     println("    Blocks:           ", mesh.nel)
