@@ -1349,6 +1349,260 @@ function test_large_ratio()
 end
 
 # ============================================================================
+# Global Assembly and Solve (CPU)
+# ============================================================================
+
+"""
+Build node-to-node sparsity pattern for a structured Q1 mesh.
+Returns row_ptr, col_idx (CSR format) for the coarse mesh.
+"""
+function build_n2n_sparsity(nx::Int, ny::Int)
+    nnodes = (nx + 1) * (ny + 1)
+
+    # Count neighbors for each node
+    row_ptr = zeros(Int, nnodes + 1)
+    row_ptr[1] = 1
+
+    for j = 0:ny
+        for i = 0:nx
+            node = i + 1 + j * (nx + 1)
+            count = 1  # self
+            if i > 0; count += 1; end
+            if i < nx; count += 1; end
+            if j > 0; count += 1; end
+            if j < ny; count += 1; end
+            if i > 0 && j > 0; count += 1; end
+            if i < nx && j > 0; count += 1; end
+            if i > 0 && j < ny; count += 1; end
+            if i < nx && j < ny; count += 1; end
+            row_ptr[node + 1] = row_ptr[node] + count
+        end
+    end
+
+    nnz = row_ptr[end] - 1
+    col_idx = zeros(Int, nnz)
+
+    # Fill column indices (sorted order)
+    for j = 0:ny
+        for i = 0:nx
+            node = i + 1 + j * (nx + 1)
+            offset = row_ptr[node]
+
+            # Add neighbors in sorted order
+            neighbors = Int[]
+            if j > 0 && i > 0; push!(neighbors, node - (nx + 1) - 1); end
+            if j > 0; push!(neighbors, node - (nx + 1)); end
+            if j > 0 && i < nx; push!(neighbors, node - (nx + 1) + 1); end
+            if i > 0; push!(neighbors, node - 1); end
+            push!(neighbors, node)  # self
+            if i < nx; push!(neighbors, node + 1); end
+            if j < ny && i > 0; push!(neighbors, node + (nx + 1) - 1); end
+            if j < ny; push!(neighbors, node + (nx + 1)); end
+            if j < ny && i < nx; push!(neighbors, node + (nx + 1) + 1); end
+
+            sort!(neighbors)
+            for (k, n) in enumerate(neighbors)
+                col_idx[offset + k - 1] = n
+            end
+        end
+    end
+
+    return row_ptr, col_idx
+end
+
+"""
+Get boundary nodes for a structured mesh on [0,1]^2.
+"""
+function get_boundary_nodes(nx::Int, ny::Int)
+    boundary = Int[]
+
+    # Bottom edge (j=0)
+    for i = 0:nx
+        push!(boundary, i + 1)
+    end
+    # Top edge (j=ny)
+    for i = 0:nx
+        push!(boundary, i + 1 + ny * (nx + 1))
+    end
+    # Left edge (i=0), excluding corners
+    for j = 1:ny-1
+        push!(boundary, 1 + j * (nx + 1))
+    end
+    # Right edge (i=nx), excluding corners
+    for j = 1:ny-1
+        push!(boundary, nx + 1 + j * (nx + 1))
+    end
+
+    return sort!(unique!(boundary))
+end
+
+"""
+Find position in CSR matrix using binary search.
+"""
+function find_matrix_position(row_ptr::Vector{Int}, col_idx::Vector{Int}, row::Int, col::Int)
+    left = row_ptr[row]
+    right = row_ptr[row + 1] - 1
+
+    while left <= right
+        mid = (left + right) >> 1
+        if col_idx[mid] == col
+            return mid
+        elseif col_idx[mid] < col
+            left = mid + 1
+        else
+            right = mid - 1
+        end
+    end
+    return -1
+end
+
+"""
+Scatter element matrices to global sparse matrix.
+"""
+function scatter_to_global!(mat_values::Vector{Float64}, rhs::Vector{Float64},
+                            Ke_cpu::Matrix{Float64}, fe_cpu::Matrix{Float64},
+                            cell_to_node::Matrix{Int},
+                            row_ptr::Vector{Int}, col_idx::Vector{Int})
+    nel = size(cell_to_node, 1)
+
+    for iel = 1:nel
+        for i = 1:4
+            gi = cell_to_node[iel, i]
+            rhs[gi] += fe_cpu[iel, i]
+            for j = 1:4
+                gj = cell_to_node[iel, j]
+                k = find_matrix_position(row_ptr, col_idx, gi, gj)
+                if k != -1
+                    mat_values[k] += Ke_cpu[iel, (i-1)*4 + j]
+                end
+            end
+        end
+    end
+end
+
+"""
+Apply homogeneous Dirichlet boundary conditions.
+Returns reduced system.
+"""
+function apply_boundary_conditions(row_ptr::Vector{Int}, col_idx::Vector{Int},
+                                   mat_values::Vector{Float64}, rhs::Vector{Float64},
+                                   boundary_nodes::Vector{Int})
+    nnodes = length(rhs)
+
+    # Build DOF mapping
+    global_to_free = fill(-1, nnodes)
+    free_to_global = Int[]
+
+    bdy_set = Set(boundary_nodes)
+    for i = 1:nnodes
+        if !(i in bdy_set)
+            push!(free_to_global, i)
+            global_to_free[i] = length(free_to_global)
+        end
+    end
+
+    nfree = length(free_to_global)
+
+    # Build reduced system
+    reduced_row_ptr = zeros(Int, nfree + 1)
+    reduced_col_idx = Int[]
+    reduced_values = Float64[]
+    reduced_rhs = zeros(nfree)
+
+    reduced_row_ptr[1] = 1
+    for i = 1:nfree
+        gi = free_to_global[i]
+        reduced_rhs[i] = rhs[gi]
+        for k = row_ptr[gi]:row_ptr[gi + 1] - 1
+            gj = col_idx[k]
+            if global_to_free[gj] != -1
+                push!(reduced_col_idx, global_to_free[gj])
+                push!(reduced_values, mat_values[k])
+            end
+        end
+        reduced_row_ptr[i + 1] = length(reduced_col_idx) + 1
+    end
+
+    return reduced_row_ptr, reduced_col_idx, reduced_values, reduced_rhs, free_to_global
+end
+
+"""
+Reconstruct fine-scale solution using MFEM basis functions.
+"""
+function reconstruct_fine_solution(nx::Int, ny::Int, ratio::Int,
+                                   coarse_solution::Vector{Float64},
+                                   phi_cpu::Array{Float64, 3},
+                                   cell_to_node::Matrix{Int})
+    nel = nx * ny
+    nx_fine = nx * ratio
+    ny_fine = ny * ratio
+    nfine = (nx_fine + 1) * (ny_fine + 1)
+    numNodes_local = (ratio + 1)^2
+
+    fine_x = zeros(nfine)
+    fine_y = zeros(nfine)
+    fine_u = zeros(nfine)
+
+    # Build fine mesh coordinates
+    for j = 0:ny_fine
+        for i = 0:nx_fine
+            idx = (i + 1) + j * (nx_fine + 1)
+            fine_x[idx] = Float64(i) / nx_fine
+            fine_y[idx] = Float64(j) / ny_fine
+        end
+    end
+
+    # Reconstruct solution element by element
+    for iel = 1:nel
+        # Coarse element position
+        ix_coarse = (iel - 1) % nx
+        iy_coarse = (iel - 1) ÷ nx
+
+        # Coarse solution at element corners
+        u_coarse = zeros(4)
+        for i = 1:4
+            gi = cell_to_node[iel, i]
+            u_coarse[i] = coarse_solution[gi]
+        end
+
+        # Loop over fine nodes in this coarse element
+        for iy_local = 0:ratio
+            for ix_local = 0:ratio
+                # Local node index
+                local_node = ix_local + iy_local * (ratio + 1) + 1
+
+                # Global fine node index
+                ix_fine = ix_coarse * ratio + ix_local
+                iy_fine = iy_coarse * ratio + iy_local
+                fine_node = (ix_fine + 1) + iy_fine * (nx_fine + 1)
+
+                # Interpolate using MFEM basis functions
+                u_fine = 0.0
+                for k = 1:4
+                    u_fine += phi_cpu[iel, local_node, k] * u_coarse[k]
+                end
+                fine_u[fine_node] = u_fine
+            end
+        end
+    end
+
+    return fine_x, fine_y, fine_u
+end
+
+"""
+Write solution to file.
+"""
+function write_solution(filename::String, vertex_x::Vector{Float64},
+                        vertex_y::Vector{Float64}, solution::Vector{Float64})
+    open(filename, "w") do io
+        println(io, "# x y u")
+        for i = 1:length(solution)
+            @printf(io, "%.6f %.6f %.6e\n", vertex_x[i], vertex_y[i], solution[i])
+        end
+    end
+end
+
+# ============================================================================
 # Main Function (CLI Interface)
 # ============================================================================
 
@@ -1460,15 +1714,20 @@ function main()
     println()
 
     # ========================================================================
-    # Validation
+    # Transfer results to CPU
     # ========================================================================
 
-    println("Validating results...")
-
+    println("Transferring results to CPU...")
+    t0 = time()
     Ke_cpu = Array(Ke_out)
     fe_cpu = Array(fe_out)
+    phi_cpu = Array(phi_out)
+    transfer_time = time() - t0
+    println("  Transfer time: ", @sprintf("%.2f ms", transfer_time * 1000))
+    println()
 
-    # Check symmetry
+    # Validation
+    println("Validating element matrices...")
     max_sym_error = 0.0
     for iel = 1:mesh.nel
         Ke1 = reshape(Ke_cpu[iel, :], 4, 4)
@@ -1477,10 +1736,110 @@ function main()
     end
     println("  Max Ke symmetry error: ", @sprintf("%.2e", max_sym_error))
 
-    # Check eigenvalues of first element
     Ke1 = reshape(Ke_cpu[1, :], 4, 4)
     eigvals_Ke = eigvals(Symmetric(Ke1))
     println("  Ke[1] eigenvalues: ", eigvals_Ke)
+    println()
+
+    # ========================================================================
+    # Build global sparsity pattern
+    # ========================================================================
+
+    println("Building global sparsity pattern...")
+    t0 = time()
+    row_ptr, col_idx = build_n2n_sparsity(nx, ny)
+    sparsity_time = time() - t0
+
+    nnodes = (nx + 1) * (ny + 1)
+    nnz = length(col_idx)
+    println("  Matrix size: $nnodes x $nnodes")
+    println("  Non-zeros:   $nnz")
+    println("  Sparsity time: ", @sprintf("%.2f ms", sparsity_time * 1000))
+    println()
+
+    # ========================================================================
+    # Scatter to global matrix
+    # ========================================================================
+
+    println("Scattering to global matrix...")
+    t0 = time()
+    mat_values = zeros(nnz)
+    rhs = zeros(nnodes)
+    scatter_to_global!(mat_values, rhs, Ke_cpu, fe_cpu, cell_to_node, row_ptr, col_idx)
+    scatter_time = time() - t0
+    println("  Scatter time: ", @sprintf("%.2f ms", scatter_time * 1000))
+    println()
+
+    # ========================================================================
+    # Apply boundary conditions
+    # ========================================================================
+
+    println("Applying boundary conditions...")
+    t0 = time()
+    boundary_nodes = get_boundary_nodes(nx, ny)
+    reduced_row_ptr, reduced_col_idx, reduced_values, reduced_rhs, free_to_global =
+        apply_boundary_conditions(row_ptr, col_idx, mat_values, rhs, boundary_nodes)
+    bc_time = time() - t0
+
+    nfree = length(free_to_global)
+    println("  Total DOFs:    $nnodes")
+    println("  Boundary DOFs: $(length(boundary_nodes))")
+    println("  Free DOFs:     $nfree")
+    println("  Reduced nnz:   $(length(reduced_col_idx))")
+    println("  BC time:       ", @sprintf("%.2f ms", bc_time * 1000))
+    println()
+
+    # ========================================================================
+    # Solve
+    # ========================================================================
+
+    println("Solving linear system...")
+
+    K = SparseMatrixCSC(nfree, nfree, reduced_row_ptr, reduced_col_idx, reduced_values)
+
+    t0 = time()
+    sol_free = K \ reduced_rhs
+    solve_time = time() - t0
+
+    println("  Solve time: ", @sprintf("%.2f ms", solve_time * 1000))
+    println()
+
+    # ========================================================================
+    # Reconstruct Fine-Scale Solution
+    # ========================================================================
+
+    println("Reconstructing fine-scale solution...")
+
+    # Expand coarse solution to full DOFs (BCs = 0)
+    coarse_solution = zeros(nnodes)
+    for i = 1:nfree
+        coarse_solution[free_to_global[i]] = sol_free[i]
+    end
+
+    t0 = time()
+    fine_x, fine_y, fine_u = reconstruct_fine_solution(nx, ny, ratio, coarse_solution, phi_cpu, cell_to_node)
+    reconstruct_time = time() - t0
+
+    println("  Fine mesh size: $(length(fine_u)) nodes")
+    println("  Reconstruction time: ", @sprintf("%.2f ms", reconstruct_time * 1000))
+    println()
+
+    # ========================================================================
+    # Output
+    # ========================================================================
+
+    println("Writing solutions to files...")
+
+    write_solution("mfem_cuda_solution_coarse.txt", vertex_x, vertex_y, coarse_solution)
+    println("  Coarse solution written to: mfem_cuda_solution_coarse.txt")
+
+    open("mfem_cuda_solution_fine.txt", "w") do io
+        println(io, "# x y u")
+        for i = 1:length(fine_u)
+            @printf(io, "%.6f %.6f %.6e\n", fine_x[i], fine_y[i], fine_u[i])
+        end
+    end
+    println("  Fine solution written to: mfem_cuda_solution_fine.txt")
     println()
 
     # ========================================================================
@@ -1492,9 +1851,16 @@ function main()
     println("="^70)
     println("  Mesh generation:     ", @sprintf("%8.2f ms", mesh_time * 1000))
     println("  Pre-computation:     ", @sprintf("%8.2f ms", precomp_time * 1000))
-    println("  MFEM assembly:       ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("  CUDA MFEM assembly:  ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("  GPU->CPU transfer:   ", @sprintf("%8.2f ms", transfer_time * 1000))
+    println("  Global sparsity:     ", @sprintf("%8.2f ms", sparsity_time * 1000))
+    println("  Scatter to global:   ", @sprintf("%8.2f ms", scatter_time * 1000))
+    println("  Boundary conditions: ", @sprintf("%8.2f ms", bc_time * 1000))
+    println("  Solve:               ", @sprintf("%8.2f ms", solve_time * 1000))
+    println("  Reconstruction:      ", @sprintf("%8.2f ms", reconstruct_time * 1000))
     println("  " * "-"^60)
-    total_time = mesh_time + precomp_time + assembly_time
+    total_time = mesh_time + precomp_time + assembly_time + transfer_time +
+                 sparsity_time + scatter_time + bc_time + solve_time + reconstruct_time
     println("  Total:               ", @sprintf("%8.2f ms", total_time * 1000))
     println()
 
@@ -1506,17 +1872,37 @@ function main()
     println("    Coarse mesh:      $nx × $ny = ", nx*ny, " elements")
     println("    MFEM ratio:       $ratio")
     println("    Effective fine:   $(nx*ratio) × $(ny*ratio) = ", (nx*ratio)*(ny*ratio), " elements")
-    println("    DOFs (coarse):    ", mesh.nnodes)
+    println("    DOFs (coarse):    $nnodes")
+    println("    Free DOFs:        $nfree")
     println("    Interior DOFs/element: ", precomp.nfree)
     println()
     println("  CUDA configuration:")
     println("    Blocks:           ", mesh.nel)
     println("    Threads/block:    256")
-    println("    Shared memory:    ", shmem_size, " bytes")
+    println("    Shared memory:    $shmem_size bytes")
     println()
     println("  Throughput:")
     println("    Elements/sec:     ", @sprintf("%.0f", mesh.nel / assembly_time))
     println("    Fine elements/sec:", @sprintf("%.0f", mesh.nel * ratio * ratio / assembly_time))
+    println()
+
+    # Solution statistics
+    println("Coarse solution statistics:")
+    minval = minimum(sol_free)
+    maxval = maximum(sol_free)
+    avgval = sum(sol_free) / length(sol_free)
+    println("  Min value: ", @sprintf("%.6e", minval))
+    println("  Max value: ", @sprintf("%.6e", maxval))
+    println("  Avg value: ", @sprintf("%.6e", avgval))
+    println()
+
+    println("Fine solution statistics:")
+    minval_fine = minimum(fine_u)
+    maxval_fine = maximum(fine_u)
+    avgval_fine = sum(fine_u) / length(fine_u)
+    println("  Min value: ", @sprintf("%.6e", minval_fine))
+    println("  Max value: ", @sprintf("%.6e", maxval_fine))
+    println("  Avg value: ", @sprintf("%.6e", avgval_fine))
     println()
 
     # Sample output
