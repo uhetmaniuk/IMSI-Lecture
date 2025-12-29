@@ -1,0 +1,359 @@
+#!/usr/bin/env julia
+#
+# @file q1_assembly.jl
+# @brief Julia version of OpenMP FEM assembly example (Optimized)
+#
+# Solves: -∇·(α∇u) = f on a 2D rectangular domain
+# with homogeneous Dirichlet boundary conditions
+#
+# Features:
+# - 2D Q1 (bilinear quadrilateral) finite elements
+# - Varying coefficients ax, ay, f
+# - Thread-parallel assembly with graph coloring
+# - Built-in sparse solver (\)
+#
+
+using SparseArrays
+using LinearAlgebra
+using Printf
+using PrecompileTools: @compile_workload
+
+# Load shared FEM base kernels
+include("FEMBase.jl")
+using .FEMBase
+
+# ============================================================================
+# System Assembly
+# ============================================================================
+
+"""
+Assemble global system with thread-parallel coloring
+Returns: mat_values, rhs, color_times
+Templated on element type parameters for compile-time optimization
+"""
+function assemble_system(mesh::Mesh, elem::Q1Element{Dim, NNodes},
+                        n2n_row_ptr::Vector{Int}, n2n_col_idx::Vector{Int},
+                        e2e_colors::Vector{Vector{Int}},
+                        ax_func::Function, ay_func::Function, f_func::Function) where {Dim, NNodes}
+    nnodes = length(mesh.vertex_x)
+    nnz = length(n2n_col_idx)
+
+    # Initialize global arrays
+    mat_values = zeros(nnz)
+    rhs = zeros(nnodes)
+
+    # Thread-local workspaces (Ke and fe are now in workspace)
+    max_tid = Threads.maxthreadid()
+    workspace_local = [ElementWorkspace{Float64, Dim, NNodes}() for _ = 1:max_tid]
+
+    # Track time per color
+    color_times = zeros(length(e2e_colors))
+
+    # Loop over colors
+    for (ic, elements) in enumerate(e2e_colors)
+        t_color = time()
+
+        # All elements in this color can be assembled in parallel (no conflicts)
+        Threads.@threads for iel in elements
+            tid = Threads.threadid()
+            @inbounds workspace = workspace_local[tid]
+
+            # Use pre-allocated arrays from workspace (avoid allocation!)
+            nodes = workspace.nodes
+            x = workspace.x_coords
+            y = workspace.y_coords
+
+            # Extract element data (manual copy, no allocation)
+            @inbounds for i = 1:NNodes
+                nodes[i] = mesh.cell_to_node[iel, i]
+            end
+            @inbounds for i = 1:NNodes
+                ni = nodes[i]
+                x[i] = mesh.vertex_x[ni]
+                y[i] = mesh.vertex_y[ni]
+            end
+
+            # Assemble element (Ke and fe are in workspace)
+            assemble_element!(elem, workspace, x, y, ax_func, ay_func, f_func)
+
+            # Extract Ke and fe from workspace for scattering
+            Ke = workspace.Ke
+            fe = workspace.fe
+
+            # Combined scatter loop (better cache locality)
+            @inbounds for i = 1:NNodes
+                gi = nodes[i]
+                rhs[gi] += fe[i]
+
+                for j = 1:NNodes
+                    gj = nodes[j]
+                    k = find_matrix_position(n2n_row_ptr, n2n_col_idx, gi, gj)
+                    mat_values[k] += Ke[i, j]
+                end
+            end
+
+        end
+
+        @inbounds color_times[ic] = time() - t_color
+    end
+
+    return mat_values, rhs, color_times
+end
+
+# ============================================================================
+# Precompilation Workload
+# ============================================================================
+
+@compile_workload begin
+    # Small warm-up problem to precompile hot functions
+    # This eliminates JIT overhead from first assembly iteration
+
+    # Generate tiny mesh (4x4 elements)
+    mesh_warm = generate_mesh(4, 4)
+    elem_warm = Q1Element()
+
+    # Build connectivity
+    n2n_row_ptr_warm, n2n_col_idx_warm, e2e_colors_warm = build_mesh_connectivity(mesh_warm)
+
+    # Simple coefficient functions
+    ax_warm(x, y, z) = 1.0
+    ay_warm(x, y, z) = 1.0
+    f_warm(x, y, z) = 1.0
+
+    # Run assembly (this precompiles all kernels)
+    mat_values_warm, rhs_warm, _ = assemble_system(
+        mesh_warm, elem_warm,
+        n2n_row_ptr_warm, n2n_col_idx_warm, e2e_colors_warm,
+        ax_warm, ay_warm, f_warm
+    )
+
+    # Precompile boundary conditions
+    # Note: apply_boundary_conditions returns CSR-style arrays, reinterpreted as CSC (works due to symmetry)
+    reduced_colptr_warm, reduced_row_idx_warm, reduced_nzval_warm, reduced_rhs_warm, free_to_global_warm =
+        apply_boundary_conditions(n2n_row_ptr_warm, n2n_col_idx_warm, mat_values_warm, rhs_warm, mesh_warm.boundary_nodes)
+
+    # Precompile sparse solve
+    K_warm = SparseMatrixCSC(length(free_to_global_warm), length(free_to_global_warm),
+                              reduced_colptr_warm, reduced_row_idx_warm, reduced_nzval_warm)
+    sol_warm = K_warm \ reduced_rhs_warm
+end
+
+# ============================================================================
+# Main Program
+# ============================================================================
+
+function main()
+    println("="^70)
+    println("Julia FEM Assembly Example (Thread-Parallel with Coloring)")
+    println("="^70)
+    println()
+    println("Usage: julia -t <threads> q1_assembly.jl [nx] [ny]")
+    println("  nx: Mesh elements in x-direction (default: 128)")
+    println("  ny: Mesh elements in y-direction (default: nx)")
+    println()
+
+    # Thread info
+    println("Number of threads: ", Threads.nthreads())
+    println()
+
+    # ========================================================================
+    # Problem setup
+    # ========================================================================
+
+    # Material coefficients and forcing term
+    # Set USE_VARYING_COEFFICIENTS to true to test with non-constant diffusion
+    USE_VARYING_COEFFICIENTS = true
+
+    # Define coefficient functions (use ternary operator to switch behavior)
+    ax(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
+    ay(x, y, z) = USE_VARYING_COEFFICIENTS ? (1.0 + 100 * cos(150 * x) * cos(150 * x) * sin(150 * y) * sin(150 * y)) : 1.0
+
+    # Right-hand side (same for both cases)
+    function f(x, y, z)
+        # Manufactured solution: u = sin(π*x) * sin(π*y)
+        # Note: For varying coefficients, this RHS is no longer exact
+        return USE_VARYING_COEFFICIENTS ? sin(x) * sin(y) : 2.0 * π^2 * sin(π * x) * sin(π * y)
+    end
+
+    # ========================================================================
+    # Mesh generation
+    # ========================================================================
+
+    # Parse command-line arguments: julia q1_assembly.jl [nx] [ny]
+    # Defaults: nx=128, ny=128
+    nx = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 128
+    ny = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : nx  # Default ny=nx if not specified
+
+    println("Generating mesh: $nx x $ny Q1 elements")
+    if USE_VARYING_COEFFICIENTS
+        println("Diffusion coefficients: VARYING (1 + 100 * cos(150*x)^2 * sin(150*y)^2 terms)")
+    else
+        println("Diffusion coefficients: CONSTANT (ax=ay=1)")
+    end
+    println()
+
+    t0 = time()
+    mesh = generate_mesh(nx, ny)
+    mesh_time = time() - t0
+
+    println("  Number of elements: ", size(mesh.cell_to_node, 1))
+    println("  Number of nodes:    ", length(mesh.vertex_x))
+    println("  Mesh generation:    ", @sprintf("%.2f ms", mesh_time * 1000))
+    println()
+
+    # ========================================================================
+    # Build connectivity and coloring
+    # ========================================================================
+
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running connectivity JIT warm-up...")
+    t_warmup = time()
+    _, _, _ = build_mesh_connectivity(mesh)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
+
+    println("Building mesh connectivity...")
+    t0 = time()
+    n2n_row_ptr, n2n_col_idx, e2e_colors = build_mesh_connectivity(mesh)
+    conn_time = time() - t0
+
+    nnz = length(n2n_col_idx)
+    println("  Matrix size: ", length(mesh.vertex_x), " x ", length(mesh.vertex_x))
+    println("  Non-zeros:   ", nnz)
+    println("  Number of colors: ", length(e2e_colors))
+    for ic = 1:length(e2e_colors)
+        println("    Color $ic: ", length(e2e_colors[ic]), " elements")
+    end
+    println("  Connectivity time: ", @sprintf("%.2f ms", conn_time * 1000))
+    println()
+
+    # ========================================================================
+    # Assembly (with JIT warm-up)
+    # ========================================================================
+
+    println("="^70)
+    println("Starting Assembly")
+    println("="^70)
+
+    elem = Q1Element()
+
+    # Warm-up run to eliminate JIT compilation overhead
+    println("Running JIT warm-up...")
+    t_warmup = time()
+    _ = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors, ax, ay, f)
+    warmup_time = time() - t_warmup
+    println("  Warm-up time: ", @sprintf("%.2f ms", warmup_time * 1000))
+    println()
+
+    # Actual timed run (using binary search for matrix position finding)
+    println("Using binary search for matrix position finding")
+    t0 = time()
+    mat_values, rhs, color_times = assemble_system(mesh, elem, n2n_row_ptr, n2n_col_idx, e2e_colors,
+                                                                  ax, ay, f)
+    assembly_time = time() - t0
+
+    # Compute kernel time (sum of per-color times) and overhead
+    kernel_time = sum(color_times)
+    overhead_time = assembly_time - kernel_time
+
+    println("Assembly complete")
+    println("  Total assembly time: ", @sprintf("%.2f ms", assembly_time * 1000))
+    println("  ├─ Kernel time:      ", @sprintf("%.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/assembly_time))
+    println("  └─ Overhead:         ", @sprintf("%.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/assembly_time))
+    println()
+    println("  Time per color:")
+    for ic = 1:length(e2e_colors)
+        println("    Color $ic (", length(e2e_colors[ic]), " elements): ",
+                @sprintf("%.2f ms", color_times[ic] * 1000))
+    end
+    println()
+
+    # ========================================================================
+    # Apply boundary conditions
+    # ========================================================================
+
+    println("Applying boundary conditions...")
+    t0 = time()
+    # Note: apply_boundary_conditions returns CSR-style arrays (row_ptr, col_idx, values)
+    # but we reinterpret them as CSC when creating SparseMatrixCSC.
+    # This works because the global stiffness matrix K is symmetric.
+    reduced_colptr, reduced_row_idx, reduced_nzval, reduced_rhs, free_to_global =
+        apply_boundary_conditions(n2n_row_ptr, n2n_col_idx, mat_values, rhs, mesh.boundary_nodes)
+    bc_time = time() - t0
+
+    nfree = length(free_to_global)
+    println("  Total DOFs:    ", length(mesh.vertex_x))
+    println("  Boundary DOFs: ", length(mesh.boundary_nodes))
+    println("  Free DOFs:     ", nfree)
+    println("  Reduced nnz:   ", length(reduced_row_idx))
+    println("  BC time:       ", @sprintf("%.2f ms", bc_time * 1000))
+    println()
+
+    # ========================================================================
+    # Solve
+    # ========================================================================
+
+    println("Solving linear system...")
+
+    # Build sparse matrix (CSC format for Julia's default sparse matrix type)
+    K = SparseMatrixCSC(nfree, nfree, reduced_colptr, reduced_row_idx, reduced_nzval)
+
+    t0 = time()
+    sol_free = K \ reduced_rhs
+    solve_time = time() - t0
+
+    println("  Solve time: ", @sprintf("%.2f ms", solve_time * 1000))
+    println()
+
+    # ========================================================================
+    # Output
+    # ========================================================================
+
+    println("Writing solution to file...")
+
+    # Expand to full solution (BCs = 0)
+    solution = zeros(length(mesh.vertex_x))
+    for i = 1:nfree
+        solution[free_to_global[i]] = sol_free[i]
+    end
+
+    write_solution("solution.txt", mesh, solution)
+    println("  Solution written to: solution.txt")
+    println()
+
+    # ========================================================================
+    # Performance summary
+    # ========================================================================
+
+    println("="^70)
+    println("Performance Summary")
+    println("="^70)
+    println("  Mesh generation:    ", @sprintf("%8.2f ms", mesh_time * 1000))
+    println("  Connectivity/color: ", @sprintf("%8.2f ms", conn_time * 1000))
+    println("  Assembly:           ", @sprintf("%8.2f ms", assembly_time * 1000))
+    println("    ├─ Kernel time:   ", @sprintf("%8.2f ms (%.1f%%)", kernel_time * 1000, 100*kernel_time/assembly_time))
+    println("    └─ Overhead:      ", @sprintf("%8.2f ms (%.1f%%)", overhead_time * 1000, 100*overhead_time/assembly_time))
+    println("  Boundary conditions:", @sprintf("%8.2f ms", bc_time * 1000))
+    println("  Solve:              ", @sprintf("%8.2f ms", solve_time * 1000))
+    println("  " * "-"^68)
+    total_time = mesh_time + conn_time + assembly_time + bc_time + solve_time
+    println("  Total:              ", @sprintf("%8.2f ms", total_time * 1000))
+    println()
+
+    # Solution statistics
+    minval = minimum(sol_free)
+    maxval = maximum(sol_free)
+    avgval = sum(sol_free) / length(sol_free)
+
+    println("Solution statistics:")
+    println("  Min value: ", @sprintf("%.6e", minval))
+    println("  Max value: ", @sprintf("%.6e", maxval))
+    println("  Avg value: ", @sprintf("%.6e", avgval))
+    println()
+end
+
+# Run main program
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

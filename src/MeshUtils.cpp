@@ -2,9 +2,6 @@
 
 #include <iostream>
 
-#include "FunctionExamples.h"
-#include "ScaledLaplacian.h"
-
 namespace IMSI {
 
     template<unsigned int dim>
@@ -178,17 +175,15 @@ namespace IMSI {
                         for (int iX = 0; iX <= twoNX; ++iX) {
                           if constexpr (dim == 1) {
                             if ((iX == 0) || (iX == twoNX)) {
-                              boundaryNode.push_back(int(vList.size()));
+                              boundaryNode.push_back(vList.size());
                             }
-
                           } else if constexpr (dim == 2) {
                             if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY)) {
-                              boundaryNode.push_back(int(vList.size()));
+                              boundaryNode.push_back(vList.size());
                             }
                           } else if constexpr (dim == 3) {
-                            if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY) || (iZ == 0) ||
-                                (iZ == twoNZ)) {
-                              boundaryNode.push_back(int(vList.size()));
+                            if ((iX == 0) || (iX == twoNX) || (iY == 0) || (iY == twoNY) || (iZ == 0) || (iZ == twoNZ)) {
+                              boundaryNode.push_back(vList.size());
                             }
                           }
                             coord[0] = 0.5 * iX * hX;
@@ -237,7 +232,7 @@ namespace IMSI {
         return Mesh{dim, vList, std::move(cType), std::move(cList), std::move(boundaryNode)};
     }
 
-    Mesh GenerateMesh(DomainParams const &params, std::vector<double> corners) {
+    Mesh GenerateMesh(DomainParams const &params) {
 
         switch (params.omega) {
             case DomainType::InputFile: {

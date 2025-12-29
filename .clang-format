@@ -9,11 +9,12 @@ AlignEscapedNewlinesLeft: true
 AlignOperands:   true
 AlignTrailingComments: true
 AllowAllParametersOfDeclarationOnNextLine: false
-AllowShortBlocksOnASingleLine: true
+AllowShortBlocksOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: true
 AllowShortFunctionsOnASingleLine: All
-AllowShortIfStatementsOnASingleLine: true
-AllowShortLoopsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: Empty
 AlwaysBreakAfterDefinitionReturnType: All
 AlwaysBreakAfterReturnType: All
 AlwaysBreakBeforeMultilineStrings: true
@@ -37,7 +38,7 @@ BreakBeforeBraces: Custom
 BreakBeforeTernaryOperators: false
 BreakConstructorInitializersBeforeComma: false
 BreakStringLiterals: true
-ColumnLimit:     120
+ColumnLimit:     100
 CommentPragmas:  '^ IWYU pragma:'
 ConstructorInitializerAllOnOneLineOrOnePerLine: true
 ConstructorInitializerIndentWidth: 4
