@@ -1,14 +1,14 @@
 #!/bin/bash
 #
 # GPU (CUDA) Scaling Study for MFEM Assembly
-# Tests problem size scaling and ratio scaling using mfem_cuda_block.jl
+# Tests problem size scaling and ratio scaling
 #
 
 OUTPUT_DIR="julia_cuda_scaling_results"
 mkdir -p $OUTPUT_DIR
 
 echo "=========================================================================="
-echo "MFEM Assembly GPU Scaling Study - Julia CUDA (Block Kernel)"
+echo "MFEM Assembly GPU Scaling Study - Julia CUDA"
 echo "=========================================================================="
 echo ""
 echo "This script studies:"
@@ -50,9 +50,9 @@ for nx in 16 32 64 128 256 512; do
     echo "  Running ${nx}×${nx} mesh with ratio=${RATIO}..."
     output_file="$OUTPUT_DIR/grid_${nx}x${nx}_r${RATIO}.txt"
 
-    julia julia/mfem_cuda_block.jl $nx $nx $RATIO > $output_file 2>&1
+    julia julia/mfem_cuda.jl $nx $nx $RATIO > $output_file 2>&1
 
-    # Extract key metrics from mfem_cuda_block.jl output
+    # Extract key metrics from mfem_cuda.jl output
     assembly_time=$(grep "MFEM assembly:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
     solve_time=$(grep "Solve:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
     reconstruct_time=$(grep "Reconstruction:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -82,7 +82,7 @@ for ratio in 8 16 32; do
     echo "  Running ${NX}×${NY} mesh with ratio=${ratio}..."
     output_file="$OUTPUT_DIR/ratio_${ratio}_mesh${NX}x${NY}.txt"
 
-    julia julia/mfem_cuda_block.jl $NX $NY $ratio > $output_file 2>&1
+    julia julia/mfem_cuda.jl $NX $NY $ratio > $output_file 2>&1
 
     # Extract key metrics
     assembly_time=$(grep "MFEM assembly:" $output_file | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -108,7 +108,7 @@ echo "==========================================================================
 summary_file="$OUTPUT_DIR/SUMMARY.txt"
 {
     echo "=========================================================================="
-    echo "MFEM GPU (CUDA) Scaling Study - Summary Report (mfem_cuda_block.jl)"
+    echo "MFEM GPU (CUDA) Scaling Study - Summary Report"
     echo "=========================================================================="
     echo ""
     echo "Generated: $(date)"
