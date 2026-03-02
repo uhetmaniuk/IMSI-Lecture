@@ -21,6 +21,42 @@ else()
 endif()
 
 #
+# Example comparing different DOT product
+#
+add_executable(
+        threads_test01.exe
+        threads_test01.cpp
+)
+
+target_include_directories(threads_test01.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos
+)
+
+target_link_libraries(threads_test01.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos ${EXTRALIB}
+)
+
+#
+# Example comparing different DOT product
+#
+add_executable(
+        simd_dot_64.exe
+        simd_dot_64.cpp
+)
+
+target_include_directories(simd_dot_64.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos
+)
+
+target_link_libraries(simd_dot_64.exe
+        PUBLIC
+        imsi_lib Kokkos::kokkos ${EXTRALIB}
+)
+
+#
 # Example comparing different sparse linear solvers
 #
 add_executable(
@@ -104,6 +140,17 @@ if(Kokkos_ENABLE_CUDA)
             imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
     )
   endif()
+
+  add_executable(cuda_matfreevec.exe
+                 cuda_matfreevec.cpp)
+  target_include_directories(cuda_matfreevec.exe
+          PUBLIC
+          imsi_lib Kokkos::kokkoskernels Kokkos::kokkos
+  )
+  target_link_libraries(cuda_matfreevec.exe
+          PUBLIC
+          imsi_lib Kokkos::kokkoskernels Kokkos::kokkos ${EXTRALIB}
+  )
 
   message(STATUS "CUDA assembly example enabled")
 else()
