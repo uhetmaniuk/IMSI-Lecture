@@ -478,9 +478,18 @@ double max_abs_diff(const std::vector<double>& a, const std::vector<double>& b)
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[])
 {
+
+    // Parse --nx= and --ny= before Kokkos::initialize so Kokkos only sees
+    // its own flags.  Unknown flags are left in argv for Kokkos.
+    int nx = 1024, ny = 1024;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if      (arg.rfind("--nx=", 0) == 0) nx = std::stoi(arg.substr(5));
+        else if (arg.rfind("--ny=", 0) == 0) ny = std::stoi(arg.substr(5));
+    }
+
     Kokkos::initialize(argc, argv);
     {
-        const int nx = 1024, ny = 1024;
 
         // ── Mesh ─────────────────────────────────────────────────────────────
         printf("Building mesh (%d×%d)…\n", nx, ny);
