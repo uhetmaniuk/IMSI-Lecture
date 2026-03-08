@@ -21,18 +21,16 @@
 // Runs entirely on the host without Kokkos parallelism so the comparison
 // remains fair against the @simd-free Julia baseline.
 // ---------------------------------------------------------------------------
+__attribute__((optimize("O2,no-tree-vectorize")))
 double dot_naive(const std::vector<double>& a, const std::vector<double>& b)
 {
     double s = 0.0;
     const std::size_t n = a.size();
 
-#pragma GCC optimize ("O0")  // Disable optimizations overall
 #pragma clang loop vectorize(disable) interleave(disable)
     for (std::size_t i = 0; i < n; ++i) {
         s += a[i] * b[i];
     }
-// Restore optimizations if needed after the loop
-#pragma GCC optimize ("O2")  // Restore to a higher optimization level
     return s;
 }
 

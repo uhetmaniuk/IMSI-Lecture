@@ -55,7 +55,9 @@ function assemble_K_cpu(coords, conn, nnodes)
             detJ = J11*J22 - J12*J21; iJ = 1.0/detJ
             dNdx = ( J22.*dNdξ .- J21.*dNdη) .* iJ
             dNdy = (-J12.*dNdξ .+ J11.*dNdη) .* iJ
-            Ke .+= detJ .* (dNdx .* dNdx' .+ dNdy .* dNdy')
+            for a in 1:4, b in 1:4
+               Ke[a,b] += detJ * (dNdx[a]*dNdx[b] + dNdy[a]*dNdy[b])
+            end
         end
         for b in 1:4, a in 1:4
             I[k] = n[a]; J[k] = n[b]; V[k] = Ke[a,b]; k += 1
