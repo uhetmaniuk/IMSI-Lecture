@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <numeric>
 #include <random>
+#include <string>
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,42 +400,40 @@ CSR assemble_K_cpu(const Mesh& m)
                 trips.emplace_back(n[a], n[b], Ke[a][b]);
     }
 
-    // Sort by (row, col)
+    // Sort by (row, col) so duplicates are adjacent
     std::sort(trips.begin(), trips.end());
 
-    // Build CSR: accumulate duplicate (row,col) entries
-    CSR K;
-    K.nnodes = m.nnodes;
-    K.row_ptr.resize(m.nnodes + 1, 0);
-
-    std::vector<std::pair<int,double>> row_entries;
-    row_entries.reserve(trips.size());
-
-    int prev_row = -1, prev_col = -1;
+    // ── Pass 1: merge duplicate (row,col) pairs, summing values ──────────────
+    struct Entry { int row, col; double val; };
+    std::vector<Entry> entries;
+    entries.reserve(trips.size());
     for (auto& [r, c, v] : trips) {
-        if (r == prev_row && c == prev_col) {
-            row_entries.back().second += v;
-        } else {
-            row_entries.emplace_back(c, v);
-            if (r != prev_row)
-                for (int rr = prev_row + 1; rr <= r; ++rr)
-                    K.row_ptr[rr + 1] = (int)row_entries.size() - 1;
-            prev_row = r;  prev_col = c;
-        }
+        if (!entries.empty() && entries.back().row == r && entries.back().col == c)
+            entries.back().val += v;
+        else
+            entries.push_back({r, c, v});
     }
-    for (int rr = prev_row + 1; rr <= m.nnodes; ++rr)
-        K.row_ptr[rr + 1] = (int)row_entries.size();
-    // Fix row_ptr: cumulative counts
-    K.row_ptr[0] = 0;
-    for (int r = 0; r < m.nnodes; ++r)
-        K.row_ptr[r+1] = K.row_ptr[r+1]; // already set above via scan
 
-    K.nnz = (int)row_entries.size();
+    // ── Pass 2: build row_ptr via count array + exclusive prefix sum ──────────
+    // row_ptr[r]   = index of first nonzero in row r
+    // row_ptr[r+1] = one past last nonzero in row r  (standard CSR)
+    CSR K;
+    K.nnodes  = m.nnodes;
+    K.nnz     = (int)entries.size();
+    K.row_ptr.resize(m.nnodes + 1, 0);
     K.col_idx.resize(K.nnz);
-    K.values.resize(K.nnz);
+    K.values .resize(K.nnz);
+
+    // Count nonzeros per row into row_ptr[row+1]
+    for (auto& e : entries) K.row_ptr[e.row + 1]++;
+
+    // Exclusive prefix sum turns counts into start offsets
+    for (int r = 0; r < m.nnodes; ++r) K.row_ptr[r + 1] += K.row_ptr[r];
+
+    // Fill col_idx / values (entries already sorted by row then col)
     for (int i = 0; i < K.nnz; ++i) {
-        K.col_idx[i] = row_entries[i].first;
-        K.values[i]  = row_entries[i].second;
+        K.col_idx[i] = entries[i].col;
+        K.values[i]  = entries[i].val;
     }
     return K;
 }
@@ -478,7 +477,6 @@ double max_abs_diff(const std::vector<double>& a, const std::vector<double>& b)
 // ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[])
 {
-
     // Parse --nx= and --ny= before Kokkos::initialize so Kokkos only sees
     // its own flags.  Unknown flags are left in argv for Kokkos.
     int nx = 1024, ny = 1024;
